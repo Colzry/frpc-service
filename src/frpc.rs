@@ -4,6 +4,7 @@ use std::env;
 use std::process::{Child, Command, Stdio};
 use std::io::{BufReader, BufRead};
 use anyhow::{Result, Context};
+use strip_ansi_escapes::strip;
 
 pub struct FrpcProcess {
     child: Child,
@@ -51,7 +52,10 @@ impl FrpcProcess {
                 let reader = BufReader::new(stdout);
                 for line in reader.lines() {
                     if let Ok(line) = line {
-                        log::info!("FRPC STDOUT: {}", line);
+                        // 在写入日志前，移除 ANSI 转义码
+                        let cleaned_bytes = strip(line);
+                        let cleaned_line = String::from_utf8_lossy(&cleaned_bytes).into_owned();
+                        log::info!("FRPC STDOUT: {}", cleaned_line);
                     }
                 }
             });
@@ -63,7 +67,10 @@ impl FrpcProcess {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines() {
                     if let Ok(line) = line {
-                        log::error!("FRPC STDERR: {}", line);
+                        // 在写入日志前，移除 ANSI 转义码
+                        let cleaned_bytes = strip(line);
+                        let cleaned_line = String::from_utf8_lossy(&cleaned_bytes).into_owned();
+                        log::error!("FRPC STDERR: {}", cleaned_line);
                     }
                 }
             });
