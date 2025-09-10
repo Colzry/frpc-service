@@ -87,7 +87,7 @@ fn main() -> Result<()> {
             unsafe {
                 MessageBoxW(
                     None,
-                    w!("服务 FrpcService 已成功删除，请重新运行程序以注册服务。"),
+                    w!("服务 FrpcService 已成功删除。"),
                     w!("提示"),
                     MB_OK | MB_ICONINFORMATION,
                 );
