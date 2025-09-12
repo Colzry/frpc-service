@@ -15,7 +15,7 @@
 
 ### 准备工作
 
-1. 下载并编译此项目，生成 `frpc_service.exe`。
+1. 点击[去下载](https://github.com/Colzry/frpc-service/releases)，或者并编译此项目，生成 `frpc_service.exe`。
 2. 将 `frpc_service.exe`、`frpc.exe` 和您的 `frpc.toml` 配置文件放置在**同一目录**下。
 
 ### 注册服务

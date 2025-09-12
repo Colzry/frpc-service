@@ -47,7 +47,7 @@ fn main() -> Result<()> {
         let result = unsafe {
             MessageBoxW(
                 None,
-                w!("服务 FrpcService 已存在，是否停止并删除？"),
+                w!("服务 FrpcService 已存在，是否停止并删除？此操作可能需要几秒钟。"),
                 w!("确认"),
                 MB_YESNO | MB_ICONQUESTION,
             )
@@ -72,29 +72,33 @@ fn main() -> Result<()> {
                         break;
                     }
                     if start.elapsed() > max_wait {
+                        unsafe {
+                            MessageBoxW(
+                                None,
+                                w!("停止服务超时，请在系统服务管理器中手动处理。"),
+                                w!("错误"),
+                                MB_OK | MB_ICONINFORMATION,
+                            );
+                        }
                         return Err(anyhow::anyhow!("服务 {} 停止超时", SERVICE_NAME));
                     }
                     std::thread::sleep(Duration::from_millis(500));
                 }
             }
-            // 增加短暂延迟，确保SCM完成清理
-            std::thread::sleep(Duration::from_secs(1));
 
             log::info!("尝试删除服务 {}", SERVICE_NAME);
             service.delete().context(format!("无法删除服务 {}", SERVICE_NAME))?;
             log::info!("服务 {} 已删除", SERVICE_NAME);
 
-            // 显示删除成功提示窗口
+            // 显示最终删除成功提示窗口
             unsafe {
                 MessageBoxW(
                     None,
                     w!("服务 FrpcService 已成功删除。"),
-                    w!("提示"),
+                    w!("操作完成"),
                     MB_OK | MB_ICONINFORMATION,
                 );
             }
-        } else {
-            println!("保留现有服务，程序退出。");
         }
     } else {
         // 服务不存在，注册服务
