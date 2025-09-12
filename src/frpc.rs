@@ -1,7 +1,7 @@
 //! frpc 进程管理，负责启动和停止 frpc 进程
 
 use std::env;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Stdio, ExitStatus};
 use std::io::{BufReader, BufRead};
 use anyhow::{Result, Context};
 use strip_ansi_escapes::strip;
@@ -86,5 +86,23 @@ impl FrpcProcess {
         self.child.wait().context("无法等待 frpc 进程终止")?;
         log::info!("frpc 进程已停止");
         Ok(())
+    }
+
+    // 检查 frpc 进程是否已退出
+    /// - `Ok(Some(ExitStatus))` 表示进程已退出
+    /// - `Ok(None)` 表示进程仍在运行
+    /// - `Err` 表示检查时出错
+    pub fn check_status(&mut self) -> Result<Option<ExitStatus>> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => {
+                log::warn!("frpc 子进程已退出，退出状态: {}", status);
+                Ok(Some(status))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => {
+                log::error!("无法检查 frpc 子进程状态: {}", e);
+                Err(e.into())
+            }
+        }
     }
 }

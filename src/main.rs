@@ -134,7 +134,7 @@ fn install_service() -> Result<()> {
             start_type: windows_service::service::ServiceStartType::AutoStart,
             error_control: windows_service::service::ServiceErrorControl::Normal,
             executable_path: PathBuf::from(exe_path_str),
-            launch_arguments: vec![OsString::from(SERVICE_ARG)], // 关键：添加 --service 参数
+            launch_arguments: vec![OsString::from(SERVICE_ARG)], // 添加 --service 参数
             dependencies: vec![],
             account_name: None,
             account_password: None,
