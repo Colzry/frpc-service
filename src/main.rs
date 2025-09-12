@@ -1,5 +1,6 @@
 //! 程序入口，自动注册服务并启动，处理二次运行逻辑
 
+#![windows_subsystem = "windows"]
 mod service;
 mod frpc;
 mod logger;
