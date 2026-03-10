@@ -15,6 +15,7 @@ use windows_service::{
     service_control_handler::{self, ServiceControlHandlerResult, ServiceStatusHandle},
     service_dispatcher,
 };
+use std::net::{TcpStream, SocketAddr};
 
 const SERVICE_NAME: &str = "FrpcService";
 const MAX_RESTART_ATTEMPTS: u32 = 3;
