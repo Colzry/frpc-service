@@ -1,7 +1,11 @@
 //! Windows 服务逻辑，管理服务的生命周期（使用windows-service库）
 
-use anyhow::{Result, Context};
-use std::sync::mpsc::{channel, Sender, Receiver, TryRecvError};
+use crate::frpc::FrpcProcess;
+use anyhow::{Context, Result};
+use std::collections::HashMap;
+use std::env;
+use std::path::PathBuf;
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::time::Duration;
 use windows_service::{
     service::{
@@ -11,10 +15,6 @@ use windows_service::{
     service_control_handler::{self, ServiceControlHandlerResult, ServiceStatusHandle},
     service_dispatcher,
 };
-use crate::frpc::FrpcProcess;
-use std::collections::HashMap;
-use std::env;
-use std::path::PathBuf;
 
 const SERVICE_NAME: &str = "FrpcService";
 const MAX_RESTART_ATTEMPTS: u32 = 3;
@@ -58,7 +58,11 @@ fn discover_frpc_instances() -> Result<Vec<(String, PathBuf, PathBuf)>> {
                         if config_file.exists() {
                             instances.push((name_part.to_string(), path.clone(), config_file));
                         } else {
-                            log::warn!("找到可执行文件 {:?}，但未找到对应的配置文件 {:?}", path, config_file);
+                            log::warn!(
+                                "找到可执行文件 {:?}，但未找到对应的配置文件 {:?}",
+                                path,
+                                config_file
+                            );
                         }
                     }
                 }
@@ -71,6 +75,21 @@ fn discover_frpc_instances() -> Result<Vec<(String, PathBuf, PathBuf)>> {
     }
 
     Ok(instances)
+}
+
+/// 检查网络是否连接可用
+fn is_network_connected() -> bool {
+    // 尝试连接公共 DNS 端口 (阿里 DNS 和 Google DNS) 验证外网连通性
+    let addrs = ["223.5.5.5:53", "8.8.8.8:53"];
+    for addr in addrs {
+        if let Ok(socket_addr) = addr.parse::<SocketAddr>() {
+            // 设置 2 秒超时时间
+            if TcpStream::connect_timeout(&socket_addr, Duration::from_secs(2)).is_ok() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn run_service() -> Result<()> {
@@ -116,7 +135,7 @@ fn run_service() -> Result<()> {
     let mut restart_attempts: HashMap<String, u32> = HashMap::new();
 
     loop {
-        // 检查停止信号
+        // 1. 检查停止信号
         match shutdown_rx.try_recv() {
             Ok(_) | Err(TryRecvError::Disconnected) => {
                 log::info!("收到停止信号或通道已断开，准备停止服务。");
@@ -125,12 +144,31 @@ fn run_service() -> Result<()> {
             Err(TryRecvError::Empty) => {}
         }
 
-        // 检查所有子进程的状态
+        // ================= 缓存当前这一轮循环的网络状态 =================
+        // 初始为 None，只有在真正需要时才去检测并赋值
+        let mut current_network_status: Option<bool> = None;
+        // ====================================================================
+
+        // 2. 检查所有子进程的状态
         for i in 0..frpc_processes.len() {
             let process = &mut frpc_processes[i];
             if let Some(_exit_status) = process.check_status()? {
                 let identifier = process.identifier.clone();
-                log::warn!("检测到 frpc 进程 [{}] 已退出。", identifier);
+
+                // ================= 使用缓存的网络状态 =================
+                // get_or_insert_with 会在值为 None 时执行闭包去检测网络，
+                // 如果已经检测过了（变成了 Some(true/false)），就直接复用结果。
+                let is_connected =
+                    *current_network_status.get_or_insert_with(|| is_network_connected());
+
+                if !is_connected {
+                    log::warn!("[{}] 网络未连接，暂不重启，等待网络恢复...", identifier);
+                    // 不累加尝试次数，直接跳过当前进程的重启逻辑
+                    continue;
+                }
+                // ============================================================
+
+                log::warn!("检测到 frpc 进程 [{}] 已退出，准备尝试重启。", identifier);
 
                 let attempts = restart_attempts.entry(identifier.clone()).or_insert(0);
                 *attempts += 1;
@@ -139,19 +177,13 @@ fn run_service() -> Result<()> {
                     log::error!(
                         "frpc 进程 [{}] 重启次数已达上限 ({}/{})，将放弃重启此进程。",
                         identifier,
-                        *attempts -1,
+                        *attempts - 1,
                         MAX_RESTART_ATTEMPTS
                     );
-                    // 可以选择在这里停止整个服务，或仅放弃此进程
-                    // 当前选择放弃此进程，让服务继续为其他进程运行
                     continue;
                 }
 
-                log::info!(
-                    "尝试第 {} 次重启 frpc 进程 [{}]...",
-                    *attempts,
-                    identifier
-                );
+                log::info!("尝试第 {} 次重启 frpc 进程 [{}]...", *attempts, identifier);
 
                 // 使用存储的路径和标识符尝试重启
                 match FrpcProcess::start(
@@ -160,13 +192,11 @@ fn run_service() -> Result<()> {
                     process.config_path.clone(),
                 ) {
                     Ok(new_process) => {
-                        // 替换掉旧的、已退出的进程实例
                         frpc_processes[i] = new_process;
                         log::info!("[{}] frpc 进程重启成功。", identifier);
                     }
                     Err(e) => {
                         log::error!("[{}] frpc 进程重启失败: {:?}", identifier, e);
-                        // 如果重启失败，可以考虑停止整个服务或稍后重试
                     }
                 }
             }

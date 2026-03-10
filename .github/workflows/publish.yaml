@@ -1,0 +1,56 @@
+name: Build Windows Executable
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch: # 允许你在 GitHub 网页端手动点击运行
+
+# 赋予 GitHub Actions 创建 Release 和上传文件的权限
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build on Windows
+    # 直接使用 GitHub 提供的 Windows 虚拟机环境
+    runs-on: windows-latest 
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          # 指定编译目标为 Windows MSVC
+          targets: x86_64-pc-windows-msvc 
+
+      - name: Cache Rust Dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          # 缓存 cargo 依赖，加快后续流水线的编译速度
+          shared-key: "windows-build"
+
+      - name: Build Release
+        # 执行 release 编译
+        run: cargo build --release
+
+      - name: Upload Artifact(Actions 页面下载用)
+        uses: actions/upload-artifact@v4
+        with:
+          name: frpc_service.exe
+          # 提取编译好的可执行文件作为制品供下载
+          path: target/release/frpc_service.exe
+          # 设置产物的保留天数
+          retention-days: 7
+          
+      - name: Publish to GitHub Release
+        # 仅当当前触发事件是推送 tag 时才执行此步骤
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          # 指定要上传到 Release 的文件路径
+          files: target/release/frpc_service.exe
+          # 自动根据两个 tag 之间的 commit 记录生成 Release Note
+          generate_release_notes: true 
