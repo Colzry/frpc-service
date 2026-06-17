@@ -1,14 +1,15 @@
 //! 程序入口，根据命令行参数分发到服务模式或交互模式
 
 #![windows_subsystem = "windows"]
-mod service;
+mod dialog;
 mod frpc;
-mod logger;
 mod interactive;
+mod logger;
+mod service;
 
-use std::env;
-use anyhow::{Result, Context};
 use crate::logger::init_logging;
+use anyhow::{Context, Result};
+use std::env;
 
 fn main() -> Result<()> {
     // 提前初始化日志，确保所有模式都能记录日志
