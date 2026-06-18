@@ -1,19 +1,16 @@
 //! 基于 GPUI 的服务管理对话框
-//!
-//! 使用单一 GPUI 应用程序和状态机模式，
-//! 替代原生 Windows MessageBoxW 和 rfd 对话框。
-//!
-//! 状态流转：
-//!   Question(状态) → 用户点击按钮 → 执行操作 → Processing → Done(结果)
-//!   用户点击"确定" → 重新检查状态 → Question(新状态) 或退出
 
 use anyhow::Result;
 use gpui::{
     div, prelude::*, px, rgb, size, App, Application, Bounds, Context, FontWeight, MouseButton,
     SharedString, Task, TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
+use std::time::Duration;
 
 use crate::interactive::{self, PreCheckResult};
+
+/// 旋转 spinner 的 Unicode braille 字符帧
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// 对话框步骤
 #[derive(Clone, Debug)]
@@ -29,6 +26,7 @@ enum Step {
 /// 服务管理对话框视图
 struct ServiceDialogView {
     step: Step,
+    spinner_frame: usize,
 }
 
 impl ServiceDialogView {
@@ -52,7 +50,9 @@ impl ServiceDialogView {
 
                 if let Some(op) = op {
                     self.step = Step::Processing;
+                    self.spinner_frame = 0;
                     cx.notify();
+                    self.start_spinner(cx);
 
                     let task: Task<Result<()>> = cx.background_spawn(async move { op() });
 
@@ -78,7 +78,9 @@ impl ServiceDialogView {
             Step::Done(_) => {
                 // 用户点击"确定"，重新检查服务状态
                 self.step = Step::Processing;
+                self.spinner_frame = 0;
                 cx.notify();
+                self.start_spinner(cx);
 
                 let mut async_cx = cx.to_async();
                 let task: Task<Result<PreCheckResult>> =
@@ -105,6 +107,41 @@ impl ServiceDialogView {
             }
             Step::Processing => {} // 操作进行中，忽略点击
         }
+    }
+
+    /// 启动 spinner 动画定时器
+    fn start_spinner(&self, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        let mut async_cx = cx.to_async();
+        cx.spawn(
+            move |_this: gpui::WeakEntity<ServiceDialogView>, _cx: &mut gpui::AsyncApp| async move {
+                loop {
+                    // 在后台线程休眠，避免阻塞 UI
+                    async_cx
+                        .background_spawn(async {
+                            std::thread::sleep(Duration::from_millis(120));
+                        })
+                        .await;
+
+                    let should_continue = this
+                        .update(&mut async_cx, |view, cx| {
+                            if matches!(view.step, Step::Processing) {
+                                view.spinner_frame =
+                                    (view.spinner_frame + 1) % SPINNER_FRAMES.len();
+                                cx.notify();
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                        .unwrap_or(false);
+                    if !should_continue {
+                        break;
+                    }
+                }
+            },
+        )
+        .detach();
     }
 
     fn question_buttons(pre_check: &PreCheckResult) -> Vec<(&str, usize)> {
@@ -208,11 +245,9 @@ impl Render for ServiceDialogView {
                                 .gap_x(px(8.0))
                                 .child(
                                     div()
-                                        .w(px(16.0))
-                                        .h(px(16.0))
-                                        .border_2()
-                                        .border_color(rgb(0x0078d4))
-                                        .rounded_full(),
+                                        .text_sm()
+                                        .text_color(rgb(0x0078d4))
+                                        .child(SPINNER_FRAMES[self.spinner_frame]),
                                 )
                                 .child(
                                     div().text_xs().text_color(rgb(0x888888)).child("处理中..."),
@@ -280,7 +315,12 @@ pub fn run_service_dialog(pre_check: PreCheckResult) {
                 }),
                 ..Default::default()
             },
-            move |_, cx| cx.new(|_| ServiceDialogView { step: initial_step }),
+            move |_, cx| {
+                cx.new(|_| ServiceDialogView {
+                    step: initial_step,
+                    spinner_frame: 0,
+                })
+            },
         )
         .unwrap();
         cx.activate(true);
