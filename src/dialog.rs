@@ -2,6 +2,10 @@
 //!
 //! 使用单一 GPUI 应用程序和状态机模式，
 //! 替代原生 Windows MessageBoxW 和 rfd 对话框。
+//!
+//! 状态流转：
+//!   Question(状态) → 用户点击按钮 → 执行操作 → Processing → Done(结果)
+//!   用户点击"确定" → 重新检查状态 → Question(新状态) 或退出
 
 use anyhow::Result;
 use gpui::{
@@ -14,25 +18,24 @@ use crate::interactive::{self, PreCheckResult};
 /// 对话框步骤
 #[derive(Clone, Debug)]
 enum Step {
-    /// 询问用户操作
-    Question,
+    /// 询问用户操作，携带当前服务状态
+    Question(PreCheckResult),
     /// 正在执行操作
     Processing,
-    /// 显示操作结果
-    Info(String),
+    /// 操作完成，显示结果；点击"确定"后重新检查状态
+    Done(String),
 }
 
 /// 服务管理对话框视图
 struct ServiceDialogView {
-    pre_check: PreCheckResult,
     step: Step,
 }
 
 impl ServiceDialogView {
     fn handle_action(&mut self, action_id: usize, cx: &mut Context<Self>) {
         match &self.step {
-            Step::Question => {
-                let op: Option<fn() -> Result<()>> = match (&self.pre_check, action_id) {
+            Step::Question(pre_check) => {
+                let op: Option<fn() -> Result<()>> = match (pre_check, action_id) {
                     (PreCheckResult::Running, 0) => Some(interactive::op_delete_and_stop),
                     (PreCheckResult::Running, 1) => Some(interactive::op_stop_only),
                     (PreCheckResult::Stopped, 0) => Some(interactive::op_start),
@@ -51,10 +54,8 @@ impl ServiceDialogView {
                     self.step = Step::Processing;
                     cx.notify();
 
-                    // 在后台线程执行阻塞操作，不阻塞 UI
                     let task: Task<Result<()>> = cx.background_spawn(async move { op() });
 
-                    // 使用 to_async() 获取拥有 'static 生命周期的 AsyncApp
                     let mut async_cx = cx.to_async();
                     cx.spawn(
                         move |this: gpui::WeakEntity<ServiceDialogView>,
@@ -65,7 +66,7 @@ impl ServiceDialogView {
                                 Err(e) => format!("操作失败：{}", e),
                             };
                             this.update(&mut async_cx, |view, cx| {
-                                view.step = Step::Info(msg);
+                                view.step = Step::Done(msg);
                                 cx.notify();
                             })
                             .ok();
@@ -74,15 +75,40 @@ impl ServiceDialogView {
                     .detach();
                 }
             }
-            Step::Info(_) => {
-                cx.quit();
+            Step::Done(_) => {
+                // 用户点击"确定"，重新检查服务状态
+                self.step = Step::Processing;
+                cx.notify();
+
+                let mut async_cx = cx.to_async();
+                let task: Task<Result<PreCheckResult>> =
+                    cx.background_spawn(async { interactive::check_service_status() });
+
+                cx.spawn(
+                    move |this: gpui::WeakEntity<ServiceDialogView>,
+                          _cx: &mut gpui::AsyncApp| async move {
+                        let result = task.await;
+                        this.update(&mut async_cx, |view, cx| match result {
+                            Ok(status @ (PreCheckResult::Running | PreCheckResult::Stopped)) => {
+                                view.step = Step::Question(status);
+                                cx.notify();
+                            }
+                            _ => {
+                                // 服务已删除或无法获取状态，退出
+                                cx.quit();
+                            }
+                        })
+                        .ok();
+                    },
+                )
+                .detach();
             }
             Step::Processing => {} // 操作进行中，忽略点击
         }
     }
 
-    fn question_buttons(&self) -> Vec<(&str, usize)> {
-        match self.pre_check {
+    fn question_buttons(pre_check: &PreCheckResult) -> Vec<(&str, usize)> {
+        match pre_check {
             PreCheckResult::Running => {
                 vec![("删除服务并停止", 0), ("仅停止", 1), ("取消", 99)]
             }
@@ -97,19 +123,18 @@ impl ServiceDialogView {
 impl Render for ServiceDialogView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (title, message, buttons, is_busy) = match &self.step {
-            Step::Question => {
+            Step::Question(pre_check) => {
                 let title = "服务管理".to_string();
-                let message = match self.pre_check {
+                let message = match pre_check {
                     PreCheckResult::Running => {
                         "服务 FrpcService 已在运行中。\n\n请选择您要执行的操作：".to_string()
                     }
                     PreCheckResult::Stopped => {
                         "服务 FrpcService 已停止。\n\n请选择您要执行的操作：".to_string()
                     }
-                    PreCheckResult::NotRegistered => unreachable!(),
+                    PreCheckResult::NotRegistered => "服务未注册。".to_string(),
                 };
-                let buttons: Vec<(String, usize)> = self
-                    .question_buttons()
+                let buttons: Vec<(String, usize)> = Self::question_buttons(pre_check)
                     .into_iter()
                     .map(|(label, id)| (label.to_string(), id))
                     .collect();
@@ -121,7 +146,7 @@ impl Render for ServiceDialogView {
                 vec![],
                 true,
             ),
-            Step::Info(msg) => (
+            Step::Done(msg) => (
                 "操作结果".to_string(),
                 msg.clone(),
                 vec![("确定".to_string(), 100)],
@@ -232,14 +257,14 @@ pub fn run_service_dialog(pre_check: PreCheckResult) {
     // 对于未注册的服务，预先执行安装操作
     let initial_step = match &pre_check {
         PreCheckResult::NotRegistered => {
-            let result = interactive::op_install_and_start();
+            let result = interactive::op_install();
             let msg = match result {
-                Ok(()) => "服务已成功注册为 FrpcService 并已启动。".to_string(),
+                Ok(()) => "服务已成功注册为 FrpcService。".to_string(),
                 Err(e) => format!("服务安装失败：{}", e),
             };
-            Step::Info(msg)
+            Step::Done(msg)
         }
-        _ => Step::Question,
+        _ => Step::Question(pre_check),
     };
 
     let app = Application::new();
@@ -255,12 +280,7 @@ pub fn run_service_dialog(pre_check: PreCheckResult) {
                 }),
                 ..Default::default()
             },
-            move |_, cx| {
-                cx.new(|_| ServiceDialogView {
-                    pre_check,
-                    step: initial_step,
-                })
-            },
+            move |_, cx| cx.new(|_| ServiceDialogView { step: initial_step }),
         )
         .unwrap();
         cx.activate(true);

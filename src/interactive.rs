@@ -43,10 +43,7 @@ pub(crate) fn check_service_status() -> Result<PreCheckResult> {
                 Ok(PreCheckResult::Stopped)
             }
             _ => {
-                log::warn!(
-                    "服务 FrpcService 处于未知状态：{:?}",
-                    status.current_state
-                );
+                log::warn!("服务 FrpcService 处于未知状态：{:?}", status.current_state);
                 Err(anyhow::anyhow!(
                     "服务处于非预期状态：{:?}",
                     status.current_state
@@ -109,10 +106,9 @@ pub(crate) fn op_delete() -> Result<()> {
     Ok(())
 }
 
-/// 操作：安装并启动服务
-pub(crate) fn op_install_and_start() -> Result<()> {
+/// 操作：仅安装服务（不启动）
+pub(crate) fn op_install() -> Result<()> {
     install_service()?;
-    start_registered_service()?;
     Ok(())
 }
 

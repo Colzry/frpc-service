@@ -4,6 +4,7 @@ use crate::frpc::FrpcProcess;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::env;
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::time::Duration;
@@ -15,7 +16,6 @@ use windows_service::{
     service_control_handler::{self, ServiceControlHandlerResult, ServiceStatusHandle},
     service_dispatcher,
 };
-use std::net::{TcpStream, SocketAddr};
 
 const SERVICE_NAME: &str = "FrpcService";
 const MAX_RESTART_ATTEMPTS: u32 = 3;
@@ -31,6 +31,101 @@ extern "system" fn service_main(_arguments: u32, _argv: *mut *mut u16) {
 pub fn run_service_dispatcher() -> Result<()> {
     service_dispatcher::start(SERVICE_NAME, service_main)?;
     Ok(())
+}
+
+/// 清理可能残留的孤儿 frpc 进程
+///
+/// 当 frpc_service 进程被异常终止（如任务管理器强杀）时，
+/// 其管理的 frpc 子进程会变成孤儿进程继续运行。
+/// 再次启动服务时，如果不清理这些孤儿进程，会导致重复的 frpc 实例。
+fn cleanup_orphan_frpc_processes(exe_dir: &std::path::Path) {
+    log::info!("检查并清理可能残留的孤儿 frpc 进程...");
+
+    // 1. 扫描目录，收集需要清理的 frpc 可执行文件名
+    let mut exe_names: Vec<String> = Vec::new();
+    if exe_dir.join("frpc.exe").exists() {
+        exe_names.push("frpc.exe".to_string());
+    }
+    if let Ok(entries) = std::fs::read_dir(exe_dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with("frpc@") && name.ends_with(".exe") {
+                    exe_names.push(name.to_string());
+                }
+            }
+        }
+    }
+
+    if exe_names.is_empty() {
+        log::info!("目录中未找到 frpc 可执行文件，跳过清理");
+        return;
+    }
+
+    let mut cleaned_count = 0;
+
+    // 2. 对每个已知的 frpc 可执行文件名，查找并终止对应的运行进程
+    for exe_name in &exe_names {
+        let output = match std::process::Command::new("tasklist")
+            .args([
+                "/FI",
+                &format!("IMAGENAME eq {}", exe_name),
+                "/FO",
+                "CSV",
+                "/NH",
+            ])
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                log::warn!("tasklist 执行失败: {}", e);
+                continue;
+            }
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("INFO:") {
+                continue;
+            }
+            // CSV 格式: "frpc.exe","12345","Console","1","50,000 K"
+            // 用引号分割来安全提取 PID
+            let parts: Vec<&str> = line.split(',').collect();
+            if parts.len() >= 2 {
+                let pid = parts[1].trim().trim_matches('"');
+                if !pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit()) {
+                    log::info!("清理孤儿进程: {} PID={}", exe_name, pid);
+                    match std::process::Command::new("taskkill")
+                        .args(["/PID", pid, "/F"])
+                        .output()
+                    {
+                        Ok(o) if o.status.success() => {
+                            cleaned_count += 1;
+                            log::info!("已终止孤儿进程 PID={}", pid);
+                        }
+                        Ok(o) => {
+                            log::warn!(
+                                "终止进程 PID={} 失败: {}",
+                                pid,
+                                String::from_utf8_lossy(&o.stderr).trim()
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!("执行 taskkill 失败 (PID={}): {}", pid, e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if cleaned_count > 0 {
+        log::info!("共清理了 {} 个孤儿 frpc 进程", cleaned_count);
+        // 等待一小段时间确保进程完全退出，释放端口等资源
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    } else {
+        log::info!("未发现需要清理的孤儿 frpc 进程");
+    }
 }
 
 /// 发现所有需要启动的 frpc 实例
@@ -113,6 +208,11 @@ fn run_service() -> Result<()> {
 
     set_service_status(&status_handle, ServiceState::StartPending)?;
     log::info!("服务状态设置为 START_PENDING");
+
+    // 清理可能残留的孤儿 frpc 进程，防止重复实例
+    let exe_path = env::current_exe().context("无法获取可执行文件路径")?;
+    let exe_dir = exe_path.parent().context("无法获取可执行文件目录")?;
+    cleanup_orphan_frpc_processes(exe_dir);
 
     // 发现并启动所有 frpc 实例
     let instance_configs = discover_frpc_instances()?;
