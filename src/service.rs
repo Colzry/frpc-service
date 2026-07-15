@@ -234,6 +234,7 @@ fn run_service() -> Result<()> {
     log::info!("服务 FrpcService 启动成功，进入监控循环");
 
     let mut restart_attempts: HashMap<String, u32> = HashMap::new();
+    let mut abandoned: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     loop {
         // 1. 检查停止信号
@@ -253,6 +254,9 @@ fn run_service() -> Result<()> {
         // 2. 检查所有子进程的状态
         for i in 0..frpc_processes.len() {
             let process = &mut frpc_processes[i];
+            if abandoned.contains(&process.identifier) {
+                continue;
+            }
             if let Some(_exit_status) = process.check_status()? {
                 let identifier = process.identifier.clone();
 
@@ -281,6 +285,7 @@ fn run_service() -> Result<()> {
                         *attempts - 1,
                         MAX_RESTART_ATTEMPTS
                     );
+                    abandoned.insert(identifier);
                     continue;
                 }
 

@@ -2,6 +2,7 @@
 
 #![windows_subsystem = "windows"]
 mod dialog;
+mod download;
 mod frpc;
 mod interactive;
 mod logger;
