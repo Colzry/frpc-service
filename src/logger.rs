@@ -1,95 +1,114 @@
-//! 日志配置与清理，按天存储日志并清理超过一个月的日志
+//! 日志配置与清理，按天存储日志并自动清理超过 30 天的日志文件
 
+use anyhow::{Context, Result};
+use chrono::Local;
+use log::LevelFilter;
 use log4rs::{
     append::file::FileAppender,
     config::{Appender, Config, Root},
     encode::pattern::PatternEncoder,
 };
-use chrono::{Local, Duration};
-use fs_extra::dir::{ls, DirEntryAttr, DirEntryValue};
-use std::collections::HashSet;
-use std::fs;
-use std::path::PathBuf;
 use std::env;
-use log::LevelFilter;
-use anyhow::{Result, Context};
+use std::fs;
+use std::path::Path;
+use std::thread;
 
-pub fn init_logging() -> Result<log4rs::Handle> {
-    // 获取当前可执行文件所在目录
+const LOG_PATTERN: &str = "{d(%Y-%m-%d %H:%M:%S)} [{l}] {m}{n}";
+
+/// 初始化日志系统，并启动后台线程在每天零点自动切换日志文件
+pub fn init_logging() -> Result<()> {
     let exe_path = env::current_exe().context("无法获取可执行文件路径")?;
-    let exe_dir = exe_path
-        .parent()
-        .context("无法获取可执行文件目录")?;
+    let exe_dir = exe_path.parent().context("无法获取可执行文件目录")?;
 
-    // 创建 logs 目录
     let logs_dir = exe_dir.join("logs");
     fs::create_dir_all(&logs_dir).context("无法创建日志目录")?;
 
-    // 配置按天生成的日志文件
-    let today = Local::now().format("%Y-%m-%d").to_string();
-    let log_file = logs_dir.join(format!("{}.log", today));
-    let logfile = FileAppender::builder()
-        // 【已修改】: 调整日志格式
-        .encoder(Box::new(PatternEncoder::new("{d(%Y-%m-%d %H:%M:%S)} [{l}] {m}{n}")))
-        .build(log_file)
-        .context("无法创建日志文件")?;
-
-    // 配置日志
-    let config = Config::builder()
-        .appender(Appender::builder().build("logfile", Box::new(logfile)))
-        .build(Root::builder().appender("logfile").build(LevelFilter::Info))
-        .context("无法构建日志配置")?;
+    // 构建今天的日志配置
+    let config = build_log_config(&logs_dir)?;
 
     let handle = log4rs::init_config(config).context("无法初始化日志")?;
 
-    // 清理超过一个月的日志
-    clean_old_logs(&logs_dir)?;
+    // 首次启动时清理超过 30 天的旧日志
+    let _ = clean_old_logs(&logs_dir);
 
-    Ok(handle)
+    // 启动后台线程：在每天零点切换到新的日志文件并清理过期日志
+    let handle_clone = handle.clone();
+    thread::spawn(move || {
+        log_rotation_loop(handle_clone, &logs_dir);
+    });
+
+    Ok(())
 }
 
-/// 清理超过一个月的日志文件
-fn clean_old_logs(logs_dir: &PathBuf) -> Result<()> {
-    let one_month_ago = Local::now() - Duration::days(30);
+/// 构建指向当天日志文件的 Config
+fn build_log_config(logs_dir: &Path) -> Result<Config> {
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    let log_file = logs_dir.join(format!("{}.log", today));
 
-    // 获取所有日志文件
-    let mut entries = HashSet::new();
-    entries.insert(DirEntryAttr::Path);
-    let log_files = ls(logs_dir, &entries)
-        .context("无法列出日志文件")?
-        .items
-        .into_iter()
-        .filter(|item| {
-            item.get(&DirEntryAttr::Path)
-                .and_then(|path| match path {
-                    DirEntryValue::String(s) => {
-                        let path = PathBuf::from(s);
-                        Some(path.is_file())
-                    }
-                    _ => None,
-                })
-                .unwrap_or(false)
-        })
-        .collect::<Vec<_>>();
+    let logfile = FileAppender::builder()
+        .encoder(Box::new(PatternEncoder::new(LOG_PATTERN)))
+        .build(log_file)
+        .context("无法创建日志文件")?;
 
-    for item in log_files {
-        let path = item
-            .get(&DirEntryAttr::Path)
-            .and_then(|p| match p {
-                DirEntryValue::String(s) => Some(PathBuf::from(s)),
-                _ => None,
-            })
-            .context("无法获取日志文件路径")?;
+    Config::builder()
+        .appender(Appender::builder().build("logfile", Box::new(logfile)))
+        .build(Root::builder().appender("logfile").build(LevelFilter::Info))
+        .context("无法构建日志配置")
+}
 
-        // 从文件名中提取日期（格式：YYYY-MM-DD.log）
-        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-            if let Some(date_str) = file_name.strip_suffix(".log") {
-                if let Ok(file_date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-                    if file_date < one_month_ago.naive_local().date() {
-                        fs::remove_file(&path).context(format!("无法删除旧日志: {:?}", path))?;
-                        log::info!("已删除旧日志: {:?}", path);
-                    }
-                }
+/// 后台日志轮转循环：在每天零点切换到新日志文件并清理过期日志
+fn log_rotation_loop(handle: log4rs::Handle, logs_dir: &Path) {
+    loop {
+        // 计算距离下一个零点（明天 00:00:00）需要等待的秒数
+        let now = Local::now();
+        let tomorrow_midnight = (now + chrono::Duration::days(1))
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let wait_secs = (tomorrow_midnight - now.naive_local()).num_seconds().max(1) as u64;
+
+        thread::sleep(std::time::Duration::from_secs(wait_secs));
+
+        // 日期已变化，重建日志配置指向新的日志文件
+        match build_log_config(logs_dir) {
+            Ok(new_config) => {
+                handle.set_config(new_config);
+                log::info!("日志文件已切换到 {}", Local::now().format("%Y-%m-%d"));
+            }
+            Err(e) => {
+                eprintln!("日志轮转失败: {:?}", e);
+            }
+        }
+
+        // 清理超过 30 天的旧日志
+        let _ = clean_old_logs(logs_dir);
+    }
+}
+
+/// 清理超过 30 天的日志文件（按文件名中的日期判断，格式 YYYY-MM-DD.log）
+fn clean_old_logs(logs_dir: &Path) -> Result<()> {
+    let cutoff = (Local::now() - chrono::Duration::days(30)).date_naive();
+
+    let entries = fs::read_dir(logs_dir).context("无法列出日志目录")?;
+
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+
+        // 只处理 YYYY-MM-DD.log 格式的文件
+        let date_str = match name.strip_suffix(".log") {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let file_date = match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        if file_date < cutoff {
+            if let Err(e) = fs::remove_file(entry.path()) {
+                eprintln!("删除旧日志 {:?} 失败: {}", entry.path(), e);
             }
         }
     }
