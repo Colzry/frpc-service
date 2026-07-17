@@ -1,91 +1,123 @@
-# FRP Client Windows Service (frpc-service)
+# FRPC 服务管理 (frpc-service)
 
-## 项目简介
+一个使用 Rust 开发的 Windows 托盘管理工具，基于 [GPUI](https://github.com/zed-industries/zed) 构建现代化图形界面，用于管理多个 [frpc](https://github.com/fatedier/frp) 实例。
 
-`frpc-service` 是一个使用 Rust 语言开发的工具，旨在将一个或多个 [FRP Client](https://github.com/fatedier/frp) (`frpc`) 实例注册为一个统一的 Windows 服务。这使得 `frpc` 能够以静默、自动启动的方式在后台稳定运行，特别适合需要同时管理多个 FRP 连接的场景，摆脱了手动维护多个命令行的繁琐。
+## 功能特性
 
-## 核心功能
+- **多配置管理**：添加、编辑、删除多个 frpc 配置，每个配置独立运行
+- **进程生命周期管理**：启动、停止、重启单个 frpc 实例，实时显示运行状态
+- **开机自启**：为每个配置单独设置开机自启动，配合 Windows 服务实现无人值守
+- **自动下载 frpc**：首次使用时自动从 GitHub 下载最新版本的 frpc，支持多个国内代理自动切换
+- **版本更新检测**：检查 frpc 是否有新版本，一键更新
+- **Windows 服务注册**：将程序注册为 Windows 服务，实现开机自启已配置的 frpc 实例
+- **主题切换**：内置多套主题（亮色 / 暗色 / 海洋蓝 / 暖日落），支持一键切换并持久化
+- **日志管理**：按天自动分割日志，自动清理超过 30 天的旧日志，支持运行中删除日志文件后自动重建
+- **TOML 代码高亮**：配置编辑器支持 TOML 语法高亮显示
+- **健康检查**：后台周期性监控 frpc 进程状态，异常退出自动更新界面
+- **单实例运行**：程序只允许运行一个窗口实例
 
-- **自动化服务管理**：程序首次运行时，会自动将自身注册为名为 `FrpcService` 的 Windows 服务，设置为开机自启，但不会立即启动服务，由用户决定何时启动。
-- **自动下载 frpc**：当程序目录下未检测到 `frpc.exe` 时，会自动从 GitHub 下载最新版本的 frp 并解压到当前目录，支持多个国内代理地址自动切换，无需手动下载。
-- **多实例支持**：除默认的 `frpc.exe` 外，工具能自动发现并管理所有遵循 `frpc@<name>.exe` 命名规则的实例，并为每个实例加载对应的 `<name>.toml` 配置文件。这使得单服务下可以同时运行多个不同配置的 `frpc` 客户端。
-- **智能服务清理**：当再次运行程序时，会提示您是否删除现有服务。确认后，程序会先停止服务并终止所有由其管理的 `frpc` 进程，然后干净地删除服务，防止进程残留。
-- **统一日志记录**：所有 `frpc` 实例的标准输出和错误输出都会被捕获，并统一记录到日志文件中。日志会为每一条输出添加实例标识符（如 `[default]` 或 `[test]`），方便您区分和排查问题。日志同时会自动过滤掉 ANSI 转义字符，确保清晰可读。日志按天自动分割（每天一个日志文件），并自动清理超过 30 天的旧日志。
-- **图形化交互**：所有服务管理操作均通过基于 GPUI 的图形界面对话框完成，支持自定义按钮标签，提供比原生弹窗更直观的用户体验。
+## 界面预览
 
-## 使用方法
+**配置列表**
 
-### 准备工作
+![配置列表](image/config.png)
 
-1. 从项目的 [Releases 页面](https://github.com/Colzry/frpc-service/releases)下载最新版本的 `frpc_service.exe`，或者自行编译此项目。
-2. 将 `frpc_service.exe` 放入一个目录中。
-3. 准备好 `frpc` 的配置文件（如 `frpc.toml`），放入同一目录。
-4. `frpc.exe` 可以手动放入，也可以在首次运行时由程序自动下载。
+**设置页面**
 
-**文件结构示例：**
+![设置页面](image/settings.png)
 
-```
-/frpc/
-│
-├── frpc_service.exe  <-- 本工具
-│
-├── frpc.exe          <-- 默认实例的可执行文件（可自动下载）
-├── frpc.toml         <-- 默认实例的配置文件
-│
-├── frpc@test.exe     <-- 名为 "test" 的实例
-├── test.toml         <-- "test" 实例的配置文件
-│
-├── frpc@another.exe  <-- 名为 "another" 的实例
-└── another.toml      <-- "another" 实例的配置文件
-```
+## 使用说明
 
-> **提示**：
-> - `frpc@test.exe` 和 `frpc@another.exe` 通常只是 `frpc.exe` 的一个重命名副本。
-> - 如果目录下没有 `frpc.exe` 或 `frpc@*.exe`，程序会在注册服务后、启动服务前自动从 GitHub 下载最新版本并解压。
+### 首次使用
 
+1. 从 [Releases 页面](https://github.com/Colzry/frpc-service/releases) 下载 `frpc_service.exe`
+2. 放入任意目录，双击运行
+3. 进入 **设置** 页面，点击 **下载** 按钮自动获取 frpc 程序
+4. 返回 **配置** 页面，点击 **添加配置** 填写 frpc TOML 配置
+5. 点击 **启动** 按钮运行 frpc 实例
 
+### 配置管理
 
-### 注册服务
+- **添加配置**：点击配置列表中的虚线卡片，填写配置名称和 TOML 内容
+- **编辑配置**：点击配置卡片上的 **编辑** 按钮
+- **删除配置**：点击配置卡片上的 **删除** 按钮（会自动停止运行中的实例）
+- **自启动**：在添加/编辑配置时设置开机自启动开关
+- **分页**：每页最多显示 8 个配置，超过后自动分页
 
-首次双击运行 `frpc_service.exe`，程序会自动执行以下操作：
+### 设置页面
 
-1. 将自身注册为 `FrpcService` 服务（不会自动启动）。
-2. 检测目录下是否存在 `frpc.exe`，如果不存在则自动从 GitHub 下载最新版本（支持多个国内代理自动切换）。
-3. 弹出对话框提示您服务已成功注册，点击 **确定**。
-4. 对话框自动刷新，显示 **启动** / **删除** / **取消** 按钮，您可以立即启动服务。
+| 功能 | 说明 |
+|------|------|
+| frpc 程序 | 查看安装状态和版本，下载或更新 frpc |
+| Windows 服务 | 注册/注销 Windows 服务，实现开机自启 |
+| 主题设置 | 下拉列表切换主题，支持 5 套内置主题 |
+| 日志 | 打开日志目录查看运行日志 |
 
-### 启动、停止与删除服务
+### Windows 服务
 
-对话框会根据服务当前状态自动显示对应的按钮，操作完成后点击 **确定** 会自动刷新状态，无需重启程序。
+注册 Windows 服务后，每次开机将自动启动所有设置了 **自启动** 的 frpc 配置，未设置自启动的配置不会自动启动。服务启动完成后会自动退出，frpc 进程独立运行。
 
-当服务正在运行时：
-
-- **删除服务并停止**：停止并删除该服务，同时终止所有由它管理的 `frpc` 子进程。
-- **仅停止**：停止服务并终止所有 `frpc` 子进程，但保留服务注册。
-- **取消**：直接退出，保留现有服务。
-
-当服务已停止时：
-
-- **启动**：启动该服务，并启动所有由它管理的 `frpc` 子进程。
-- **删除**：删除该服务注册。
-- **取消**：直接退出，保留现有服务。
+> **注意**：注册/注销服务需要管理员权限。
 
 ## 项目结构
 
-- `src/main.rs`: 程序入口点，根据命令行参数分发到服务模式或交互模式。
-- `src/service.rs`: 包含了 `frpc-service` 运行在服务模式下的核心逻辑，负责发现并管理所有 `frpc` 子进程的生命周期。
-- `src/frpc.rs`: 负责启动和终止单个 `frpc` 进程实例，并处理其标准输出。
-- `src/interactive.rs`: 交互模式逻辑，负责服务状态检测及服务操作（启动、停止、删除、安装）。
-- `src/dialog.rs`: 基于 GPUI 的图形界面对话框，使用状态机模式管理操作流程。
-- `src/download.rs`: frpc 下载模块，负责从 GitHub 获取最新版本并通过代理地址自动切换下载，支持进度条显示和 zip 解压。
-- `src/logger.rs`: 日志模块，负责日志配置、按天自动轮转日志文件以及清理超过 30 天的旧日志。
+```
+src/
+├── main.rs                 # 程序入口，单实例检查，分发服务模式/交互模式
+├── app.rs                  # 主应用视图 AppView，事件处理，run_app 入口
+├── sidebar.rs              # 侧边栏导航菜单渲染
+├── pages/
+│   ├── mod.rs              # 页面模块声明
+│   ├── config_list.rs      # 配置列表页面（卡片网格 + 分页）
+│   ├── config_editor.rs    # 配置编辑器页面（名称 + TOML 编辑 + 自启动）
+│   └── settings.rs         # 设置页面（frpc 版本、服务、主题、日志）
+├── config.rs               # 配置管理（conf/ 目录下的元数据和 TOML 文件）
+├── frpc_mg.rs              # frpc 进程管理（启动、停止、状态监控）
+├── service.rs              # Windows 服务管理（注册、注销、服务调度器）
+├── download.rs             # frpc 下载模块（GitHub 代理、zip 解压、版本检查）
+├── logger.rs               # 日志模块（按天轮转、自动清理、文件删除检测重建）
+├── message.rs              # 消息提示组件（info/success/warning/error）
+├── theme.rs                # 主题管理（加载、切换、偏好持久化）
+└── icons.rs                # 自定义 SVG 图标定义和资源加载
+```
 
-## 编译与运行
+## 主题系统
 
-确保您已安装 [Rust 环境](https://www.rust-lang.org/tools/install)。
+内置 5 套主题，通过设置页面的下拉列表切换：
+
+| 主题名称 | 模式 | 说明 |
+|----------|------|------|
+| Default Light | 亮色 | 默认亮色主题 |
+| Default Dark | 暗色 | 默认暗色主题 |
+| Custom Dark | 暗色 | 深色侧边栏变体 |
+| Ocean Blue | 暗色 | 蓝色调暗色主题 |
+| Warm Sunset | 暗色 | 暖橙色调暗色主题 |
+
+主题偏好保存在 `conf/theme.json` 中，重启后自动恢复。
+
+## 编译
+
+需要 Rust 环境，项目使用 GitHub Actions 构建。
 
 ```bash
+# 开发构建
+cargo build
+
+# 发布构建
 cargo build --release
 ```
 
-编译完成后，可执行文件目录为在 `target/release/frpc_service.exe` 。
+输出文件：`target/release/frpc_service.exe`
+
+### 依赖
+
+- [gpui](https://github.com/zed-industries/zed) — Zed 编辑器的 GPU 加速 UI 框架
+- [gpui-component](https://github.com/longbridge/gpui-component) — gpui 组件库（按钮、输入框、下拉列表、Spinner 等）
+- [windows-service](https://crates.io/crates/windows-service) — Windows 服务 API 绑定
+- [reqwest](https://crates.io/crates/reqwest) — HTTP 客户端（frpc 下载）
+- [zip](https://crates.io/crates/zip) — ZIP 解压
+- [log4rs](https://crates.io/crates/log4rs) — 日志框架
+
+## 许可证
+
+ GPL-3.0 License
