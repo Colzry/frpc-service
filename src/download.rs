@@ -32,7 +32,7 @@ fn get_latest_release_tag(client: &reqwest::blocking::Client) -> Result<String> 
     let url = "https://api.github.com/repos/fatedier/frp/releases/latest";
     let resp = client
         .get(url)
-        .header("User-Agent", "frpc-service")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36")
         .send()
         .context("无法获取最新版本信息")?;
 
@@ -60,7 +60,7 @@ fn download_with_progress(
 ) -> Result<()> {
     let resp = client
         .get(url)
-        .header("User-Agent", "frpc-service")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36")
         .send()
         .context("无法发起下载请求")?;
 

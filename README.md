@@ -30,7 +30,7 @@
 
 ### 首次使用
 
-1. 从 [Releases 页面](https://github.com/Colzry/frpc-service/releases) 下载 `frpc_service.exe`
+1. 从 [Releases 页面](https://github.com/Colzry/frpc-service/releases) 下载 `frpdesk.exe`
 2. 放入任意目录，双击运行
 3. 进入 **设置** 页面，点击 **下载** 按钮自动获取 frpc 程序
 4. 返回 **配置** 页面，点击 **添加配置** 填写 frpc TOML 配置
@@ -107,7 +107,7 @@ cargo build
 cargo build --release
 ```
 
-输出文件：`target/release/frpc_service.exe`
+输出文件：`target/release/frpdesk.exe`
 
 ### 依赖
 

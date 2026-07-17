@@ -1,5 +1,5 @@
 [package]
-name = "frpc_service"
+name = "frpdesk"
 version = "1.4.0"
 edition = "2021"
 
