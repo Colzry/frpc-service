@@ -178,29 +178,75 @@ fn run_service() -> Result<()> {
     .context("无法注册服务控制处理程序")?;
     set_service_status(&status_handle, ServiceState::StartPending)?;
 
+    let settings = config::load_settings();
+
     // 启动所有自启动配置
     let instances = discover_auto_start_instances()?;
-    let mut started = 0;
+    let mut processes: Vec<(String, FrpcProcess)> = Vec::new();
     for (id, exe, conf) in instances {
-        match FrpcProcess::start(id, exe, conf, None) {
-            Ok(_p) => {
-                started += 1;
-                // 不持有进程句柄，让 frpc 独立运行
+        match FrpcProcess::start(id.clone(), exe, conf, None) {
+            Ok(p) => {
+                log::info!("[{}] frpc 进程已启动", id);
+                processes.push((id, p));
             }
             Err(e) => log::error!("启动 frpc 实例失败: {:?}", e),
         }
     }
 
-    if started == 0 {
+    if processes.is_empty() {
         log::warn!("没有任何 frpc 进程成功启动");
     } else {
-        log::info!("成功启动 {} 个 frpc 实例", started);
+        log::info!("成功启动 {} 个 frpc 实例", processes.len());
     }
 
-    // 设置服务状态为已停止并退出
-    // frpc 进程已独立运行，服务无需保持
-    set_service_status(&status_handle, ServiceState::Stopped)?;
-    Ok(())
+    if !settings.process_guard {
+        // 未开启进程守护，服务直接退出，frpc 进程独立运行
+        set_service_status(&status_handle, ServiceState::Stopped)?;
+        return Ok(());
+    }
+
+    // 开启进程守护：保持服务运行，监控进程状态
+    log::info!("进程守护已开启，服务将持续运行");
+    set_service_status(&status_handle, ServiceState::Running)?;
+
+    // 重新发现自启动配置，用于进程退出后重启
+    let auto_start_map = discover_auto_start_map();
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+
+        // 读取 UI 手动停止列表
+        let guard_stopped = config::load_guard_stopped();
+
+        // 检查是否有进程退出
+        let mut restart_list = Vec::new();
+        processes.retain(|(name, proc)| {
+            if FrpcProcess::is_pid_running(proc.pid()) {
+                true
+            } else {
+                if guard_stopped.contains(name) {
+                    log::info!("[{}] 进程已退出（UI 手动停止，不重启）", name);
+                } else {
+                    log::warn!("[{}] 进程守护发现进程已退出，将重启", name);
+                    restart_list.push(name.clone());
+                }
+                false
+            }
+        });
+
+        // 重启退出的进程
+        for name in restart_list {
+            if let Some((exe, conf)) = auto_start_map.get(&name) {
+                match FrpcProcess::start(name.clone(), exe.clone(), conf.clone(), None) {
+                    Ok(p) => {
+                        log::info!("[{}] 进程守护重启成功", name);
+                        processes.push((name, p));
+                    }
+                    Err(e) => log::error!("[{}] 进程守护重启失败: {:?}", name, e),
+                }
+            }
+        }
+    }
 }
 
 fn set_service_status(
@@ -236,6 +282,23 @@ fn discover_auto_start_instances() -> Result<Vec<(String, PathBuf, PathBuf)>> {
         }
     }
     Ok(instances)
+}
+
+/// 发现自启动配置，返回 name -> (exe, conf) 的映射
+fn discover_auto_start_map() -> std::collections::HashMap<String, (PathBuf, PathBuf)> {
+    let mut map = std::collections::HashMap::new();
+    let frpc_exe = match config::frpc_exe_path() {
+        Ok(p) if p.exists() => p,
+        _ => return map,
+    };
+    for meta in config::get_auto_start_configs().unwrap_or_default() {
+        if let Ok(conf) = config::config_toml_path(&meta.name) {
+            if conf.exists() {
+                map.insert(meta.name.clone(), (frpc_exe.clone(), conf));
+            }
+        }
+    }
+    map
 }
 
 /// 发现当前正在运行的 frpc 进程，匹配到已有配置

@@ -21,6 +21,22 @@ pub struct ConfigStore {
     pub configs: Vec<FrpcConfigMeta>,
 }
 
+/// 全局应用设置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppSettings {
+    /// 进程守护：开启后服务模式下进程异常退出会自动重启
+    #[serde(default)]
+    pub process_guard: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            process_guard: false,
+        }
+    }
+}
+
 /// 获取程序目录下的 conf/ 目录路径
 pub fn conf_dir() -> Result<PathBuf> {
     let exe_path = std::env::current_exe().context("无法获取可执行文件路径")?;
@@ -38,6 +54,66 @@ pub fn bin_dir() -> Result<PathBuf> {
 /// 元数据文件路径: conf/metadata.json
 fn metadata_path() -> Result<PathBuf> {
     Ok(conf_dir()?.join("metadata.json"))
+}
+
+/// 全局设置文件路径: conf/settings.json
+fn settings_path() -> Result<PathBuf> {
+    Ok(conf_dir()?.join("settings.json"))
+}
+
+/// 进程守护手动停止列表文件路径: conf/guard_stopped.json
+fn guard_stopped_path() -> Result<PathBuf> {
+    Ok(conf_dir()?.join("guard_stopped.json"))
+}
+
+/// 加载全局设置
+pub fn load_settings() -> AppSettings {
+    let path = match settings_path() {
+        Ok(p) => p,
+        Err(_) => return AppSettings::default(),
+    };
+    if !path.exists() {
+        return AppSettings::default();
+    }
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// 保存全局设置
+pub fn save_settings(settings: &AppSettings) -> Result<()> {
+    let dir = conf_dir()?;
+    fs::create_dir_all(&dir).context("无法创建 conf 目录")?;
+    let path = settings_path()?;
+    let content = serde_json::to_string_pretty(settings).context("无法序列化设置")?;
+    fs::write(&path, content).context("无法写入 settings.json")?;
+    Ok(())
+}
+
+/// 加载进程守护手动停止列表
+pub fn load_guard_stopped() -> Vec<String> {
+    let path = match guard_stopped_path() {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    if !path.exists() {
+        return Vec::new();
+    }
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// 保存进程守护手动停止列表
+pub fn save_guard_stopped(list: &[String]) -> Result<()> {
+    let dir = conf_dir()?;
+    fs::create_dir_all(&dir).context("无法创建 conf 目录")?;
+    let path = guard_stopped_path()?;
+    let content = serde_json::to_string_pretty(list).context("无法序列化停止列表")?;
+    fs::write(&path, content).context("无法写入 guard_stopped.json")?;
+    Ok(())
 }
 
 /// 获取指定配置的 toml 文件路径: conf/<name>.toml

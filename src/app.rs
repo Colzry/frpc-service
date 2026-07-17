@@ -57,6 +57,7 @@ pub(crate) struct AppView {
     pub status_level: MessageLevel,
     pub config_page: usize,
     pub theme_select: Entity<SelectState<Vec<SharedString>>>,
+    pub process_guard: bool,
 }
 
 impl AppView {
@@ -91,7 +92,7 @@ impl AppView {
             service_registered,
             configs,
             running,
-            stopped_configs: std::collections::HashSet::new(),
+            stopped_configs: config::load_guard_stopped().into_iter().collect(),
             edit_name: String::new(),
             edit_content: String::new(),
             edit_auto_start: false,
@@ -106,6 +107,7 @@ impl AppView {
             status_level: MessageLevel::Info,
             config_page: 0,
             theme_select: theme_select.clone(),
+            process_guard: config::load_settings().process_guard,
         };
 
         // 订阅主题下拉选择事件
@@ -117,10 +119,33 @@ impl AppView {
         s
     }
 
-    pub fn switch_page(&mut self, page: Page, cx: &mut Context<Self>) {
+    pub fn switch_page(&mut self, page: Page, _cx: &mut Context<Self>) {
         self.page = page;
         self.status_message = None;
         self.config_page = 0;
+    }
+
+    pub fn toggle_process_guard(&mut self, cx: &mut Context<Self>) {
+        self.process_guard = !self.process_guard;
+        let settings = config::AppSettings {
+            process_guard: self.process_guard,
+        };
+        match config::save_settings(&settings) {
+            Ok(()) => {
+                let msg = if self.process_guard {
+                    "进程守护已开启".to_string()
+                } else {
+                    "进程守护已关闭".to_string()
+                };
+                log::info!("进程守护设置已变更: {}", self.process_guard);
+                self.set_status_message(msg, MessageLevel::Success, cx);
+            }
+            Err(e) => {
+                log::error!("保存进程守护设置失败: {}", e);
+                self.set_status_message(format!("保存设置失败: {}", e), MessageLevel::Error, cx);
+            }
+        }
+        cx.notify();
         cx.notify();
     }
 
@@ -314,6 +339,9 @@ impl AppView {
         }
         // 从手动停止列表中移除，允许健康检查监控
         self.stopped_configs.remove(name);
+        // 更新共享文件
+        let _ =
+            config::save_guard_stopped(&self.stopped_configs.iter().cloned().collect::<Vec<_>>());
         // 检查 frpc.exe 是否存在
         if !crate::download::has_frpc_executable(
             &std::env::current_exe()
@@ -423,6 +451,9 @@ impl AppView {
     pub fn stop_config(&mut self, name: &str, cx: &mut Context<Self>) {
         // 标记为手动停止，防止健康检查重新发现
         self.stopped_configs.insert(name.to_string());
+        // 写入共享文件，通知服务守护不要重启
+        let _ =
+            config::save_guard_stopped(&self.stopped_configs.iter().cloned().collect::<Vec<_>>());
         if let Some(mut rp) = self.running.remove(name) {
             self.is_processing = true;
             cx.notify();
@@ -807,7 +838,28 @@ impl AppView {
                     if !dead_names.is_empty() {
                         for name in &dead_names {
                             view.running.remove(name);
-                            log::info!("[{}] 已从运行列表移除", name);
+
+                            // 进程守护：非手动停止的进程自动重启
+                            if view.process_guard && !view.stopped_configs.contains(name) {
+                                log::info!("[{}] 进程守护：尝试重启", name);
+                                match service::start_frpc_process(name) {
+                                    Ok(p) => {
+                                        view.running
+                                            .insert(name.clone(), RunningProcess { process: p });
+                                        log::info!("[{}] 进程守护：重启成功", name);
+                                        view.set_status_message(
+                                            format!("'{}' 进程异常退出，已自动重启", name),
+                                            MessageLevel::Warning,
+                                            cx,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        log::error!("[{}] 进程守护：重启失败 - {}", name, e);
+                                    }
+                                }
+                            } else {
+                                log::info!("[{}] 已从运行列表移除", name);
+                            }
                         }
                         cx.notify();
                     }

@@ -51,13 +51,7 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
                 .flex()
                 .flex_col()
                 .gap_y(px(12.0))
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(cx.theme().foreground)
-                        .child("frpc 程序"),
-                )
+                // 标题行：标题 + 状态
                 .child(
                     div()
                         .flex()
@@ -66,8 +60,9 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("状态："),
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(cx.theme().foreground)
+                                .child("frpc 程序"),
                         )
                         .child(
                             div()
@@ -80,7 +75,7 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
                                 .child(if has_frpc { "已安装" } else { "未安装" }),
                         ),
                 )
-                // 版本 + 更新按钮（同一行）
+                // 版本 + 更新按钮
                 .child(
                     div()
                         .flex()
@@ -90,14 +85,12 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("版本："),
-                        )
-                        .child(
-                            div().text_sm().text_color(cx.theme().foreground).child(
-                                view.frpc_version
-                                    .clone()
-                                    .unwrap_or_else(|| "未知".to_string()),
-                            ),
+                                .child(format!(
+                                    "版本：{}",
+                                    view.frpc_version
+                                        .clone()
+                                        .unwrap_or_else(|| "未知".to_string())
+                                )),
                         )
                         .child({
                             let btn_label = if has_frpc { "更新" } else { "下载" };
@@ -139,14 +132,7 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
                 .flex()
                 .flex_col()
                 .gap_y(px(12.0))
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(cx.theme().foreground)
-                        .child("Windows 服务"),
-                )
-                // 状态 + 注册/注销按钮（同一行）
+                // 标题行：标题 + 状态 + 注册/注销按钮
                 .child(
                     div()
                         .flex()
@@ -155,8 +141,9 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("状态："),
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(cx.theme().foreground)
+                                .child("Windows 服务"),
                         )
                         .child(
                             div()
@@ -210,7 +197,7 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("服务注册后，开启自启动的配置才能开机自启。"),
+                        .child("服务注册后，开启自启动的配置会开机自启。"),
                 ),
         )
         .child(div().mx(px(24.0)).child(separator(cx.theme())))
@@ -222,14 +209,94 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
                 .flex()
                 .flex_col()
                 .gap_y(px(12.0))
+                // 标题行：标题 + 下拉列表
                 .child(
                     div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(cx.theme().foreground)
-                        .child("主题设置"),
+                        .flex()
+                        .items_center()
+                        .gap_x(px(12.0))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(cx.theme().foreground)
+                                .child("主题设置"),
+                        )
+                        .child(div().w(px(200.0)).child(Select::new(&view.theme_select))),
+                ),
+        )
+        .child(div().mx(px(24.0)).child(separator(cx.theme())))
+        // ========== 进程守护 ==========
+        .child(
+            div()
+                .mx(px(24.0))
+                .py(px(16.0))
+                .flex()
+                .flex_col()
+                .gap_y(px(12.0))
+                // 标题行：标题 + 状态 + 开关
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_x(px(12.0))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(cx.theme().foreground)
+                                .child("进程守护"),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(if view.process_guard {
+                                    cx.theme().success
+                                } else {
+                                    cx.theme().muted_foreground
+                                })
+                                .child(if view.process_guard {
+                                    "已开启"
+                                } else {
+                                    "未开启"
+                                }),
+                        )
+                        .child(
+                            // 小开关
+                            div()
+                                .id("switch-process-guard")
+                                .w(px(36.0))
+                                .h(px(20.0))
+                                .rounded(px(10.0))
+                                .bg(if view.process_guard {
+                                    cx.theme().primary
+                                } else {
+                                    cx.theme().border
+                                })
+                                .cursor_pointer()
+                                .flex()
+                                .items_center()
+                                .px(px(2.0))
+                                .child(
+                                    div()
+                                        .w(px(16.0))
+                                        .h(px(16.0))
+                                        .rounded_full()
+                                        .bg(gpui::rgb(0xffffff))
+                                        .when(view.process_guard, |el| el.ml_auto()),
+                                )
+                                .on_click(cx.listener(|view, _event, _window, cx| {
+                                    view.toggle_process_guard(cx);
+                                })),
+                        ),
                 )
-                .child(div().w(px(200.0)).child(Select::new(&view.theme_select))),
+                // 说明
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("开启后，frpc 进程异常退出时会自动重启。"),
+                ),
         )
         .child(div().mx(px(24.0)).child(separator(cx.theme())))
         // ========== 日志 ==========
@@ -240,27 +307,33 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
                 .flex()
                 .flex_col()
                 .gap_y(px(12.0))
+                // 标题行：标题 + 按钮
                 .child(
                     div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(cx.theme().foreground)
-                        .child("日志"),
-                )
-                .child(
-                    div().flex().items_center().gap_x(px(12.0)).child(
-                        Button::new("btn-open-logs")
-                            .with_size(Size::Small)
-                            .label("打开日志目录")
-                            .on_click(cx.listener(|_view, _event, _window, _cx| {
-                                let logs_dir = std::env::current_exe()
-                                    .ok()
-                                    .and_then(|p| p.parent().map(|p| p.join("logs")));
-                                if let Some(dir) = logs_dir {
-                                    let _ = std::process::Command::new("explorer").arg(dir).spawn();
-                                }
-                            })),
-                    ),
+                        .flex()
+                        .items_center()
+                        .gap_x(px(12.0))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(cx.theme().foreground)
+                                .child("日志"),
+                        )
+                        .child(
+                            Button::new("btn-open-logs")
+                                .with_size(Size::Small)
+                                .label("打开日志目录")
+                                .on_click(cx.listener(|_view, _event, _window, _cx| {
+                                    let logs_dir = std::env::current_exe()
+                                        .ok()
+                                        .and_then(|p| p.parent().map(|p| p.join("logs")));
+                                    if let Some(dir) = logs_dir {
+                                        let _ =
+                                            std::process::Command::new("explorer").arg(dir).spawn();
+                                    }
+                                })),
+                        ),
                 ),
         )
         .child(div().mx(px(24.0)).child(separator(cx.theme())));
