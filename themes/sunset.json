@@ -1,0 +1,40 @@
+{
+  "themes": [
+    {
+      "is_default": false,
+      "name": "Warm Sunset",
+      "mode": "dark",
+      "colors": {
+        "accent.background": "#3d2b1f",
+        "accent.foreground": "#ffecd2",
+        "background": "#1a1008",
+        "border": "#3d2b1f",
+        "foreground": "#ffecd2",
+        "muted.background": "#3d2b1f",
+        "muted.foreground": "#c4a882",
+        "primary.background": "#ff8c42",
+        "primary.foreground": "#ffffff",
+        "primary.hover.background": "#ef7c32",
+        "primary.active.background": "#df6c22",
+        "secondary.background": "#3d2b1f",
+        "secondary.foreground": "#ffecd2",
+        "secondary.hover.background": "#4d3b2f",
+        "secondary.active.background": "#2d1b0f",
+        "sidebar.background": "#150c04",
+        "sidebar.foreground": "#e8d0b0",
+        "sidebar.border": "#3d2b1f",
+        "sidebar.accent.background": "#2d1b0f",
+        "sidebar.accent.foreground": "#ffecd2",
+        "sidebar.primary.background": "#ff8c42",
+        "sidebar.primary.foreground": "#ffffff",
+        "danger.background": "#ff6b6b",
+        "danger.foreground": "#ffffff",
+        "success.background": "#51cf66",
+        "success.foreground": "#ffffff",
+        "input.border": "#3d2b1f",
+        "popover.background": "#1f140a",
+        "popover.foreground": "#ffecd2"
+      }
+    }
+  ]
+}

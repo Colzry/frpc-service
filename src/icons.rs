@@ -11,6 +11,8 @@ pub enum AppIcon {
     CircleCheckGreen,
     CircleXRed,
     FileSliders,
+    FileSlidersBlack,
+    FileSlidersLight,
     FileSlidersWhite,
     InfoBlue,
     InfoYellow,
@@ -18,6 +20,8 @@ pub enum AppIcon {
     Plus,
     RotateCcw,
     Settings,
+    SettingsBlack,
+    SettingsLight,
     SettingsWhite,
     Square,
     SquarePen,
@@ -31,6 +35,8 @@ impl IconNamed for AppIcon {
             Self::CircleCheckGreen => "icons/circle-check-green.svg".into(),
             Self::CircleXRed => "icons/circle-x-red.svg".into(),
             Self::FileSliders => "icons/file-sliders.svg".into(),
+            Self::FileSlidersBlack => "icons/file-sliders-black.svg".into(),
+            Self::FileSlidersLight => "icons/file-sliders-light.svg".into(),
             Self::FileSlidersWhite => "icons/file-sliders-white.svg".into(),
             Self::InfoBlue => "icons/info-blue.svg".into(),
             Self::InfoYellow => "icons/info-yellow.svg".into(),
@@ -38,6 +44,8 @@ impl IconNamed for AppIcon {
             Self::Plus => "icons/plus.svg".into(),
             Self::RotateCcw => "icons/rotate-ccw.svg".into(),
             Self::Settings => "icons/settings.svg".into(),
+            Self::SettingsBlack => "icons/settings-black.svg".into(),
+            Self::SettingsLight => "icons/settings-light.svg".into(),
             Self::SettingsWhite => "icons/settings-white.svg".into(),
             Self::Square => "icons/square.svg".into(),
             Self::SquarePen => "icons/square-pen.svg".into(),
@@ -64,6 +72,12 @@ impl gpui::AssetSource for AppAssets {
             "icons/file-sliders.svg" => Some(Cow::Borrowed(include_bytes!(
                 "../icons/file-sliders.svg"
             ) as &[u8])),
+            "icons/file-sliders-black.svg" => Some(Cow::Borrowed(include_bytes!(
+                "../icons/file-sliders-black.svg"
+            ) as &[u8])),
+            "icons/file-sliders-light.svg" => Some(Cow::Borrowed(include_bytes!(
+                "../icons/file-sliders-light.svg"
+            ) as &[u8])),
             "icons/file-sliders-white.svg" => Some(Cow::Borrowed(include_bytes!(
                 "../icons/file-sliders-white.svg"
             ) as &[u8])),
@@ -81,6 +95,12 @@ impl gpui::AssetSource for AppAssets {
             "icons/settings.svg" => Some(Cow::Borrowed(
                 include_bytes!("../icons/settings.svg") as &[u8]
             )),
+            "icons/settings-black.svg" => Some(Cow::Borrowed(include_bytes!(
+                "../icons/settings-black.svg"
+            ) as &[u8])),
+            "icons/settings-light.svg" => Some(Cow::Borrowed(include_bytes!(
+                "../icons/settings-light.svg"
+            ) as &[u8])),
             "icons/settings-white.svg" => Some(Cow::Borrowed(include_bytes!(
                 "../icons/settings-white.svg"
             ) as &[u8])),

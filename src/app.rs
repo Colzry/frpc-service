@@ -6,7 +6,8 @@ use gpui::{
     Window, WindowBounds, WindowOptions,
 };
 use gpui_component::input::InputState;
-use gpui_component::{ActiveTheme, Root};
+use gpui_component::select::{SelectEvent, SelectState};
+use gpui_component::{ActiveTheme, IndexPath, Root};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -19,7 +20,9 @@ use crate::message::MessageLevel;
 use crate::pages;
 use crate::service::{self, PreCheckResult};
 use crate::sidebar;
+use crate::theme;
 
+/// 自定义暗色主题 JSON
 /// 当前页面
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Page {
@@ -53,6 +56,7 @@ pub(crate) struct AppView {
     pub status_message: Option<String>,
     pub status_level: MessageLevel,
     pub config_page: usize,
+    pub theme_select: Entity<SelectState<Vec<SharedString>>>,
 }
 
 impl AppView {
@@ -60,6 +64,9 @@ impl AppView {
         pre_check: PreCheckResult,
         name_input: Entity<InputState>,
         content_input: Entity<InputState>,
+        theme_select: Entity<SelectState<Vec<SharedString>>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Self {
         let configs = config::load_configs().unwrap_or_default();
         let service_registered = !matches!(pre_check, PreCheckResult::NotRegistered);
@@ -79,7 +86,7 @@ impl AppView {
             }
         }
 
-        Self {
+        let s = Self {
             page: Page::ConfigList,
             service_registered,
             configs,
@@ -98,7 +105,16 @@ impl AppView {
             status_message: None,
             status_level: MessageLevel::Info,
             config_page: 0,
-        }
+            theme_select: theme_select.clone(),
+        };
+
+        // 订阅主题下拉选择事件
+        cx.subscribe_in(&theme_select, window, |view, _entity, event, window, cx| {
+            view.on_theme_selected(event, window, cx);
+        })
+        .detach();
+
+        s
     }
 
     pub fn switch_page(&mut self, page: Page, cx: &mut Context<Self>) {
@@ -106,6 +122,24 @@ impl AppView {
         self.status_message = None;
         self.config_page = 0;
         cx.notify();
+    }
+
+    pub fn on_theme_selected(
+        &mut self,
+        event: &SelectEvent<Vec<SharedString>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let SelectEvent::Confirm(Some(name)) = event {
+            let name = name.to_string();
+            theme::apply_theme(&name, cx);
+            theme::save_theme_preference(&name);
+            self.set_status_message(
+                format!("主题已切换为 '{}'", name),
+                MessageLevel::Success,
+                cx,
+            );
+        }
     }
 
     pub fn switch_page_with_message(
@@ -812,6 +846,9 @@ pub fn run_app(pre_check: PreCheckResult) {
     let app = gpui_platform::application().with_assets(crate::icons::AppAssets);
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
+        theme::load_all_themes(cx);
+        let saved_theme = theme::load_theme_preference();
+        theme::apply_theme(&saved_theme, cx);
         let bounds = Bounds::centered(None, size(px(960.0), px(600.0)), cx);
         let init = pre_check.clone();
         cx.open_window(
@@ -827,12 +864,31 @@ pub fn run_app(pre_check: PreCheckResult) {
             move |window, cx| {
                 let name_input = cx.new(|cx| InputState::new(window, cx));
                 let content_input = cx.new(|cx| InputState::new(window, cx).code_editor("toml"));
+
+                // 创建主题下拉选择
+                let themes = theme::available_themes();
+                let current = theme::current_theme_name();
+                let theme_names: Vec<SharedString> =
+                    themes.iter().map(|t| t.name.clone().into()).collect();
+                let selected = themes.iter().position(|t| t.name == current);
+                let selected_index = selected.map(|i| IndexPath::default().row(i));
+                let theme_select =
+                    cx.new(|cx| SelectState::new(theme_names, selected_index, window, cx));
+
                 let app_view = cx.new(|cx| {
-                    let mut v = AppView::new(init, name_input, content_input);
+                    let mut v = AppView::new(
+                        init,
+                        name_input,
+                        content_input,
+                        theme_select.clone(),
+                        window,
+                        cx,
+                    );
                     v.detect_frpc_version(cx);
                     AppView::start_health_monitor(cx);
                     v
                 });
+
                 cx.new(|cx| Root::new(app_view, window, cx))
             },
         )

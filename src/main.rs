@@ -11,6 +11,7 @@ mod message;
 mod pages;
 mod service;
 mod sidebar;
+mod theme;
 
 use crate::logger::init_logging;
 use anyhow::{Context, Result};

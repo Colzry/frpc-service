@@ -1,0 +1,39 @@
+{
+  "themes": [
+    {
+      "is_default": true,
+      "name": "Custom Dark",
+      "mode": "dark",
+      "colors": {
+        "background": "neutral-800",
+        "border": "neutral-700",
+        "sidebar.background": "#1a1a2e",
+        "sidebar.accent.background": "#2a2a3e",
+        "sidebar.border": "#2a2a3e",
+        "sidebar.foreground": "#f5f5f5",
+        "sidebar.accent.foreground": "#f5f5f5",
+        "sidebar.primary.background": "#f5f5f5",
+        "sidebar.primary.foreground": "#0a0a0a",
+        "secondary.background": "neutral-600",
+        "secondary.hover.background": "#4a4a5e",
+        "secondary.active.background": "#3e3e50",
+        "secondary.foreground": "neutral-50",
+        "muted.background": "neutral-700",
+        "input.border": "#3a3a4e",
+        "popover.background": "neutral-900",
+        "primary.background": "neutral-50",
+        "primary.foreground": "neutral-900",
+        "primary.hover.background": "neutral-100",
+        "primary.active.background": "neutral-200",
+        "foreground": "neutral-50",
+        "accent.background": "neutral-700",
+        "accent.foreground": "neutral-50",
+        "muted.foreground": "neutral-400",
+        "danger.background": "red-400",
+        "danger.foreground": "red-600",
+        "success.background": "green-400",
+        "success.foreground": "green-600"
+      }
+    }
+  ]
+}

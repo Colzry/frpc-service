@@ -1,0 +1,40 @@
+{
+  "themes": [
+    {
+      "is_default": false,
+      "name": "Ocean Blue",
+      "mode": "dark",
+      "colors": {
+        "accent.background": "#1e3a5f",
+        "accent.foreground": "#e0f0ff",
+        "background": "#0d1b2a",
+        "border": "#1b3a5c",
+        "foreground": "#e0f0ff",
+        "muted.background": "#1b3a5c",
+        "muted.foreground": "#8fb8de",
+        "primary.background": "#4a9eff",
+        "primary.foreground": "#ffffff",
+        "primary.hover.background": "#3a8eef",
+        "primary.active.background": "#2a7edf",
+        "secondary.background": "#1b3a5c",
+        "secondary.foreground": "#e0f0ff",
+        "secondary.hover.background": "#2a4a6c",
+        "secondary.active.background": "#0f2a4a",
+        "sidebar.background": "#0a1628",
+        "sidebar.foreground": "#c0d8f0",
+        "sidebar.border": "#1b3a5c",
+        "sidebar.accent.background": "#162d4a",
+        "sidebar.accent.foreground": "#e0f0ff",
+        "sidebar.primary.background": "#4a9eff",
+        "sidebar.primary.foreground": "#ffffff",
+        "danger.background": "#ff6b6b",
+        "danger.foreground": "#ffffff",
+        "success.background": "#51cf66",
+        "success.foreground": "#ffffff",
+        "input.border": "#1b3a5c",
+        "popover.background": "#0f2035",
+        "popover.foreground": "#e0f0ff"
+      }
+    }
+  ]
+}

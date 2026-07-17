@@ -10,11 +10,30 @@ use crate::icons::AppIcon;
 pub fn render(view: &AppView, cx: &mut Context<AppView>) -> gpui::AnyElement {
     let is_config = matches!(view.page, Page::ConfigList | Page::ConfigEditor { .. });
     let is_settings = view.page == Page::Settings;
-    let menu_icon = |active: bool, icon: AppIcon, icon_white: AppIcon| -> AppIcon {
+    let is_dark = crate::theme::is_dark_mode(cx);
+    let primary_is_dark = crate::theme::is_primary_foreground_dark();
+
+    // 根据主题和选中状态选择图标：
+    // - 选中 + primary 前景深色：黑色图标（如 Default Dark、Custom Dark）
+    // - 选中 + primary 前景浅色：白色图标（如其他主题）
+    // - 未选中 + 暗色主题：浅灰色图标
+    // - 未选中 + 亮色主题：深色图标（currentColor 默认黑色）
+    let menu_icon = |active: bool,
+                     dark_icon: AppIcon,
+                     light_icon: AppIcon,
+                     black_icon: AppIcon,
+                     white_icon: AppIcon|
+     -> AppIcon {
         if active {
-            icon_white
+            if primary_is_dark {
+                black_icon
+            } else {
+                white_icon
+            }
+        } else if is_dark {
+            light_icon
         } else {
-            icon
+            dark_icon
         }
     };
 
@@ -86,6 +105,8 @@ pub fn render(view: &AppView, cx: &mut Context<AppView>) -> gpui::AnyElement {
                             img(menu_icon(
                                 is_config,
                                 AppIcon::FileSliders,
+                                AppIcon::FileSlidersLight,
+                                AppIcon::FileSlidersBlack,
                                 AppIcon::FileSlidersWhite,
                             )
                             .path()
@@ -121,11 +142,15 @@ pub fn render(view: &AppView, cx: &mut Context<AppView>) -> gpui::AnyElement {
                             view.detect_frpc_version(cx);
                         }))
                         .child(
-                            img(
-                                menu_icon(is_settings, AppIcon::Settings, AppIcon::SettingsWhite)
-                                    .path()
-                                    .as_ref(),
+                            img(menu_icon(
+                                is_settings,
+                                AppIcon::Settings,
+                                AppIcon::SettingsLight,
+                                AppIcon::SettingsBlack,
+                                AppIcon::SettingsWhite,
                             )
+                            .path()
+                            .as_ref())
                             .w(px(16.0))
                             .h(px(16.0)),
                         )

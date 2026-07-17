@@ -1,0 +1,40 @@
+{
+  "themes": [
+    {
+      "is_default": true,
+      "name": "Default Dark",
+      "mode": "dark",
+      "colors": {
+        "accent.background": "neutral-800",
+        "accent.foreground": "neutral-50",
+        "background": "neutral-950",
+        "border": "neutral-800",
+        "foreground": "neutral-50",
+        "muted.background": "neutral-800",
+        "muted.foreground": "neutral-400",
+        "primary.background": "neutral-50",
+        "primary.foreground": "neutral-900",
+        "primary.hover.background": "neutral-100",
+        "primary.active.background": "neutral-200",
+        "secondary.background": "neutral-800",
+        "secondary.foreground": "neutral-50",
+        "secondary.hover.background": "#292929",
+        "secondary.active.background": "#212121",
+        "sidebar.background": "#0a0a0a",
+        "sidebar.foreground": "#f5f5f5",
+        "sidebar.border": "#262626",
+        "sidebar.accent.background": "#262626",
+        "sidebar.accent.foreground": "#f5f5f5",
+        "sidebar.primary.background": "#f5f5f5",
+        "sidebar.primary.foreground": "#0a0a0a",
+        "danger.background": "red-400",
+        "danger.foreground": "red-600",
+        "success.background": "green-400",
+        "success.foreground": "green-600",
+        "input.border": "#2f2f2f",
+        "popover.background": "neutral-950",
+        "popover.foreground": "neutral-50"
+      }
+    }
+  ]
+}

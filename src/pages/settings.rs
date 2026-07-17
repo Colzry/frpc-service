@@ -5,6 +5,7 @@ use gpui::prelude::*;
 use gpui::{div, px, FontWeight};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::select::Select;
 use gpui_component::spinner::Spinner;
 use gpui_component::{ActiveTheme, Disableable, Sizable, Size};
 
@@ -211,6 +212,24 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
                         .text_color(cx.theme().muted_foreground)
                         .child("服务注册后，开启自启动的配置才能开机自启。"),
                 ),
+        )
+        .child(div().mx(px(24.0)).child(separator(cx.theme())))
+        // ========== 主题设置 ==========
+        .child(
+            div()
+                .mx(px(24.0))
+                .py(px(16.0))
+                .flex()
+                .flex_col()
+                .gap_y(px(12.0))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(cx.theme().foreground)
+                        .child("主题设置"),
+                )
+                .child(div().w(px(200.0)).child(Select::new(&view.theme_select))),
         )
         .child(div().mx(px(24.0)).child(separator(cx.theme())))
         // ========== 日志 ==========
