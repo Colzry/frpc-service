@@ -10,6 +10,7 @@ use log4rs::{
 };
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::thread;
 
@@ -28,6 +29,9 @@ pub fn init_logging() -> Result<()> {
 
     let handle = log4rs::init_config(config).context("无法初始化日志")?;
 
+    // 确认日志文件已创建并写入首条记录
+    log::info!("日志系统初始化完成，日志目录: {:?}", logs_dir);
+
     // 首次启动时清理超过 30 天的旧日志
     let _ = clean_old_logs(&logs_dir);
 
@@ -45,10 +49,17 @@ fn build_log_config(logs_dir: &Path) -> Result<Config> {
     let today = Local::now().format("%Y-%m-%d").to_string();
     let log_file = logs_dir.join(format!("{}.log", today));
 
+    // 预创建日志文件，确保可写
+    if !log_file.exists() {
+        let mut f = fs::File::create(&log_file).context("无法创建日志文件")?;
+        f.write_all(b"").context("无法写入日志文件")?;
+        f.flush().ok();
+    }
+
     let logfile = FileAppender::builder()
         .encoder(Box::new(PatternEncoder::new(LOG_PATTERN)))
-        .build(log_file)
-        .context("无法创建日志文件")?;
+        .build(&log_file)
+        .context("无法打开日志文件")?;
 
     Config::builder()
         .appender(Appender::builder().build("logfile", Box::new(logfile)))

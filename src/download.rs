@@ -21,21 +21,10 @@ const PROXY_URLS: &[&str] = &[
     "https://ghproxy.cn/",
 ];
 
-/// 检查目录下是否存在 frpc.exe 或 frpc@*.exe
+/// 检查 bin/ 目录下是否存在 frpc.exe
 pub fn has_frpc_executable(exe_dir: &Path) -> bool {
-    if exe_dir.join("frpc.exe").exists() {
-        return true;
-    }
-    if let Ok(entries) = fs::read_dir(exe_dir) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with("frpc@") && name.ends_with(".exe") {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+    // 检查新的 bin/ 目录结构
+    exe_dir.join("bin").join("frpc.exe").exists()
 }
 
 /// 获取最新 release 版本号（如 "v0.70.0"）
@@ -103,10 +92,13 @@ fn download_with_progress(
 }
 
 /// 需要从 zip 中提取的文件名
-const EXTRACT_FILES: &[&str] = &["frpc.exe", "frpc.toml"];
+const EXTRACT_FILES: &[&str] = &["frpc.exe"];
 
-/// 从 zip 文件中提取 frpc.exe 和 frpc.toml 到目标目录
+/// 从 zip 文件中提取 frpc.exe 到目标目录（bin/）
 fn extract_frpc_from_zip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
+    // 确保 bin/ 目录存在
+    fs::create_dir_all(dest_dir).context("无法创建 bin 目录")?;
+
     let file = fs::File::open(zip_path).context("无法打开下载的 zip 文件")?;
     let mut archive = zip::ZipArchive::new(file).context("无法解析 zip 文件")?;
 
@@ -121,7 +113,7 @@ fn extract_frpc_from_zip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
             None => continue,
         };
 
-        // 只提取 frpc.exe 和 frpc.toml（可能在子目录中，如 frp_0.70.0_windows_amd64/）
+        // 只提取 frpc.exe（可能在子目录中，如 frp_0.70.0_windows_amd64/）
         if EXTRACT_FILES.contains(&file_name.as_str()) {
             let out_path = dest_dir.join(&*file_name);
             let mut out_file =
@@ -141,14 +133,57 @@ fn extract_frpc_from_zip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
     }
 }
 
-/// 主入口：下载并解压 frpc.exe 到目标目录
+/// 检查是否有新版本可用
 ///
-/// 会依次尝试：原始 GitHub 地址 → 各代理地址
+/// 返回 Some(latest_tag) 如果有更新，None 如果已是最新
+pub fn check_update() -> Result<Option<String>> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let bin_dir = exe_dir.join("bin");
+    let exe_path = bin_dir.join("frpc.exe");
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("创建 HTTP 客户端失败")?;
+
+    let tag = get_latest_release_tag(&client)?;
+
+    if exe_path.exists() {
+        let mut cmd = std::process::Command::new(&exe_path);
+        cmd.arg("--version");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        if let Ok(output) = cmd.output() {
+            let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if version_str.contains(tag.trim_start_matches('v')) {
+                return Ok(None);
+            }
+        }
+    }
+
+    Ok(Some(tag))
+}
+
+/// 主入口：下载并解压 frpc.exe 到 bin/ 目录
+///
+/// `program_dir` 为程序所在目录，frpc.exe 会解压到 `program_dir/bin/` 下。
 /// 进度通过 `on_progress(downloaded_bytes, total_bytes)` 回调报告
 pub fn download_and_extract_frpc(
-    dest_dir: &Path,
+    program_dir: &Path,
     on_progress: &(dyn Fn(u64, u64) + Sync),
 ) -> Result<()> {
+    // 下载目标为 bin/ 子目录
+    let bin_dir = program_dir.join("bin");
+    // 确保 bin/ 目录存在（下载临时文件需要写入此目录）
+    fs::create_dir_all(&bin_dir).context("无法创建 bin 目录")?;
+
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
@@ -157,6 +192,26 @@ pub fn download_and_extract_frpc(
     // 1. 获取最新版本号
     let tag = get_latest_release_tag(&client)?;
     log::info!("获取到最新 frp 版本: {}", tag);
+
+    // 检查是否已是最新版本，跳过下载
+    let exe_path = bin_dir.join("frpc.exe");
+    if exe_path.exists() {
+        let mut cmd = std::process::Command::new(&exe_path);
+        cmd.arg("--version");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        if let Ok(output) = cmd.output() {
+            let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if version_str.contains(tag.trim_start_matches('v')) {
+                log::info!("frpc 已是最新版本 ({}), 跳过下载", tag);
+                return Ok(());
+            }
+        }
+    }
 
     let file_name = format!("frp_{}_windows_amd64.zip", tag.trim_start_matches('v'));
     let github_url = format!(
@@ -172,7 +227,7 @@ pub fn download_and_extract_frpc(
     }
 
     // 3. 依次尝试下载
-    let zip_path = dest_dir.join("__frpc_download_temp.zip");
+    let zip_path = bin_dir.join("__frpc_download_temp.zip");
     let mut last_error = String::new();
 
     for url in &candidate_urls {
@@ -180,8 +235,8 @@ pub fn download_and_extract_frpc(
         match download_with_progress(&client, url, &zip_path, on_progress) {
             Ok(()) => {
                 log::info!("下载成功: {}", url);
-                // 解压
-                match extract_frpc_from_zip(&zip_path, dest_dir) {
+                // 解压到 bin/ 目录
+                match extract_frpc_from_zip(&zip_path, &bin_dir) {
                     Ok(()) => {
                         let _ = fs::remove_file(&zip_path);
                         return Ok(());
