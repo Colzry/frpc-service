@@ -4,17 +4,83 @@ use anyhow::{Context, Result};
 use chrono::Local;
 use log::LevelFilter;
 use log4rs::{
-    append::file::FileAppender,
+    append::Append,
     config::{Appender, Config, Root},
-    encode::pattern::PatternEncoder,
 };
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::thread;
 
-const LOG_PATTERN: &str = "{d(%Y-%m-%d %H:%M:%S)} [{l}] {m}{n}";
+/// 自适应文件写入器：每次写入时以 append + create 模式打开文件，
+/// 文件被外部删除后下次写入自动重建，无需定期检查。
+struct ResilientWriter {
+    path: PathBuf,
+    file: Mutex<Option<fs::File>>,
+}
+
+impl std::fmt::Debug for ResilientWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResilientWriter")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+impl ResilientWriter {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            file: Mutex::new(None),
+        }
+    }
+
+    fn write_log(&self, record: &log::Record) {
+        let mut guard = self.file.lock().unwrap();
+
+        // 如果没有文件句柄，尝试打开（不存在则创建）
+        if guard.is_none() {
+            match OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+            {
+                Ok(f) => *guard = Some(f),
+                Err(e) => {
+                    eprintln!("无法打开日志文件 {:?}: {}", self.path, e);
+                    return;
+                }
+            }
+        }
+
+        if let Some(ref mut file) = *guard {
+            let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+            let level = record.level();
+            let args = record.args();
+            let line = format!("{} [{}] {}\n", timestamp, level, args);
+            if file.write_all(line.as_bytes()).is_err() {
+                // 写入失败（文件可能被删除），丢弃句柄，下次重建
+                *guard = None;
+            }
+        }
+    }
+}
+
+impl Append for ResilientWriter {
+    fn append(&self, record: &log::Record) -> anyhow::Result<()> {
+        self.write_log(record);
+        Ok(())
+    }
+
+    fn flush(&self) {
+        let guard = self.file.lock().unwrap();
+        if let Some(ref file) = *guard {
+            let _ = file.sync_all();
+        }
+    }
+}
 
 /// 初始化日志系统，并启动后台线程在每天零点自动切换日志文件
 pub fn init_logging() -> Result<()> {
@@ -49,56 +115,42 @@ fn build_log_config(logs_dir: &Path) -> Result<Config> {
     let today = Local::now().format("%Y-%m-%d").to_string();
     let log_file = logs_dir.join(format!("{}.log", today));
 
-    // 预创建日志文件，确保可写
-    if !log_file.exists() {
-        let mut f = fs::File::create(&log_file).context("无法创建日志文件")?;
-        f.write_all(b"").context("无法写入日志文件")?;
-        f.flush().ok();
-    }
-
-    let logfile = FileAppender::builder()
-        .encoder(Box::new(PatternEncoder::new(LOG_PATTERN)))
-        .build(&log_file)
-        .context("无法打开日志文件")?;
+    let writer = ResilientWriter::new(log_file);
 
     Config::builder()
-        .appender(Appender::builder().build("logfile", Box::new(logfile)))
+        .appender(Appender::builder().build("logfile", Box::new(writer)))
         .build(Root::builder().appender("logfile").build(LevelFilter::Info))
         .context("无法构建日志配置")
 }
 
-/// 后台日志轮转循环：
-/// - 每 30 秒检查一次当天日志文件是否存在，若被外部删除则重建
-/// - 日期变化时切换到新的日志文件并清理过期日志
+/// 后台日志轮转循环：每天零点切换到新的日志文件并清理过期日志
 fn log_rotation_loop(handle: log4rs::Handle, logs_dir: &Path) {
     let mut last_date = Local::now().format("%Y-%m-%d").to_string();
 
     loop {
-        thread::sleep(std::time::Duration::from_secs(30));
+        // 计算距离下一个零点需要等待的秒数
+        let wait_secs = {
+            let now = Local::now();
+            let tomorrow = (now + chrono::Duration::days(1))
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .unwrap();
+            (tomorrow - now.naive_local()).num_seconds().max(1) as u64
+        };
 
+        thread::sleep(std::time::Duration::from_secs(wait_secs));
+
+        // 切换到新日期的日志文件
         let today = Local::now().format("%Y-%m-%d").to_string();
-        let log_file = logs_dir.join(format!("{}.log", today));
-
-        // 日期变化：轮转 + 清理旧日志
-        let date_changed = today != last_date;
-        // 日志文件被外部删除：需要重建
-        let file_deleted = !log_file.exists();
-
-        if date_changed || file_deleted {
+        if today != last_date {
             match build_log_config(logs_dir) {
                 Ok(new_config) => {
                     handle.set_config(new_config);
-                    if date_changed {
-                        log::info!("日志文件已切换到 {}", today);
-                        let _ = clean_old_logs(logs_dir);
-                        last_date = today;
-                    } else {
-                        log::warn!("日志文件被外部删除，已重新创建: {:?}", log_file);
-                    }
+                    log::info!("日志文件已切换到 {}", today);
+                    let _ = clean_old_logs(logs_dir);
+                    last_date = today;
                 }
-                Err(e) => {
-                    eprintln!("日志配置重建失败: {:?}", e);
-                }
+                Err(e) => eprintln!("日志轮转失败: {:?}", e),
             }
         }
     }
