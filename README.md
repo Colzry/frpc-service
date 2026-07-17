@@ -1,6 +1,6 @@
-# FRPC 服务管理 (frpc-service)
+# FrpDesk
 
-一个使用 Rust 开发的 Windows Frpc管理工具，基于 [GPUI](https://github.com/zed-industries/zed) 构建现代化图形界面，用于管理多个 [frpc](https://github.com/fatedier/frp) 实例。
+一个使用 Rust 开发的 Windows frpc 桌面管理工具，基于 [GPUI](https://github.com/zed-industries/zed) 构建现代化原生图形界面，用于管理多个 [frpc](https://github.com/fatedier/frp) 实例。
 
 ## 功能特性
 
