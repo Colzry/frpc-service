@@ -72,7 +72,7 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
     let mut grid = div()
         .flex()
         .flex_wrap()
-        .gap_x(px(16.0))
+        .justify_between()
         .gap_y(px(16.0))
         .px(px(24.0))
         .pb(px(16.0));
@@ -117,6 +117,15 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
         );
 
     grid = grid.child(add_card);
+
+    // 补齐最后一行的占位，确保 justify_between 对齐
+    let total_items = page_configs.len() + 1; // 配置卡片 + 添加卡片
+    let remainder = total_items % 3;
+    if remainder != 0 {
+        for _ in 0..(3 - remainder) {
+            grid = grid.child(div().w(px(240.0)).h(px(140.0)));
+        }
+    }
 
     content = content.child(header).child(grid);
 
