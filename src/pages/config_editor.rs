@@ -110,6 +110,12 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
                         .text_sm()
                         .text_color(cx.theme().foreground)
                         .child("开机自启动"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("该功能需要设置中注册服务后才生效"),
                 ),
         )
         // 底部按钮栏

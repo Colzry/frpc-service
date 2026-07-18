@@ -5,8 +5,12 @@ use anyhow::{Context, Result};
 use std::env;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
+
+/// 服务停止信号，由 SCM 停止事件设置
+static SERVICE_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 use windows_service::service::{
     ServiceAccess, ServiceControlAccept, ServiceErrorControl, ServiceExitCode, ServiceInfo,
     ServiceStartType, ServiceState, ServiceStatus, ServiceType,
@@ -103,7 +107,7 @@ pub(crate) fn install_service() -> Result<()> {
     Ok(())
 }
 
-/// 注销 Windows 服务（先停止再删除）
+/// 注销 Windows 服务（先停止服务、清理残留 frpc 进程，再删除）
 pub(crate) fn uninstall_service() -> Result<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::all())?;
     let service = manager.open_service(
@@ -172,10 +176,17 @@ pub fn run_service_dispatcher() -> Result<()> {
 }
 
 fn run_service() -> Result<()> {
-    let status_handle = service_control_handler::register(SERVICE_NAME, |_control_event| {
-        ServiceControlHandlerResult::NotImplemented
-    })
-    .context("无法注册服务控制处理程序")?;
+    SERVICE_STOP_REQUESTED.store(false, Ordering::SeqCst);
+    let status_handle =
+        service_control_handler::register(SERVICE_NAME, |control_event| match control_event {
+            windows_service::service::ServiceControl::Stop
+            | windows_service::service::ServiceControl::Shutdown => {
+                SERVICE_STOP_REQUESTED.store(true, Ordering::SeqCst);
+                ServiceControlHandlerResult::NoError
+            }
+            _ => ServiceControlHandlerResult::NotImplemented,
+        })
+        .context("无法注册服务控制处理程序")?;
     set_service_status(&status_handle, ServiceState::StartPending)?;
 
     let settings = config::load_settings();
@@ -212,11 +223,24 @@ fn run_service() -> Result<()> {
     // 重新发现自启动配置，用于进程退出后重启
     let auto_start_map = discover_auto_start_map();
 
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(5));
+    let mut loop_count: u32 = 0;
+    let mut guard_stopped: Vec<String> = Vec::new();
 
-        // 读取 UI 手动停止列表
-        let guard_stopped = config::load_guard_stopped();
+    loop {
+        // 检查是否收到停止信号
+        if SERVICE_STOP_REQUESTED.load(Ordering::SeqCst) {
+            log::info!("收到服务停止信号");
+            set_service_status(&status_handle, ServiceState::Stopped)?;
+            return Ok(());
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        loop_count = (loop_count + 1) % 3;
+
+        // 每 3 秒读取一次 UI 手动停止列表
+        if loop_count == 0 {
+            guard_stopped = config::load_guard_stopped();
+        }
 
         // 检查是否有进程退出
         let mut restart_list = Vec::new();
