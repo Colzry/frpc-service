@@ -30,19 +30,7 @@ fn main() {
 // 主题色彩配置 - 与 gpui-component 暗色主题匹配
 const COL_BG: [u8; 4] = [0x1A, 0x1A, 0x2E, 0xFF]; // 深蓝黑背景 (#1A1A2E)
 const COL_BG_LIGHT: [u8; 4] = [0x22, 0x22, 0x3A, 0xFF]; // 稍浅的内部背景 (#22223A)
-const COL_PRIMARY: [u8; 4] = [0x3B, 0x82, 0xF6, 0xFF]; // 主蓝色 (#3B82F6)
-const COL_PRIMARY_LIGHT: [u8; 4] = [0x60, 0xA5, 0xFA, 0xFF]; // 浅主蓝 (#60A5FA)
 const COL_FG: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF]; // 纯白前景
-const COL_ACCENT: [u8; 4] = [0x81, 0x8C, 0xF8, 0xFF]; // 紫蓝装饰 (#818CF8)
-
-fn fill_rect(pixels: &mut [u8], w: u32, x1: i32, y1: i32, x2: i32, y2: i32, c: [u8; 4]) {
-    for y in y1.max(0)..=y2.min(w as i32 - 1) {
-        for x in x1.max(0)..=x2.min(w as i32 - 1) {
-            let i = ((y as u32 * w + x as u32) * 4) as usize;
-            pixels[i..i + 4].copy_from_slice(&c);
-        }
-    }
-}
 
 fn fill_rounded_rect(
     pixels: &mut [u8],
@@ -75,21 +63,6 @@ fn fill_rounded_rect(
             if inside {
                 let i = ((y as u32 * w + x as u32) * 4) as usize;
                 pixels[i..i + 4].copy_from_slice(&c);
-            }
-        }
-    }
-}
-
-fn fill_circle(pixels: &mut [u8], w: u32, cx: i32, cy: i32, r: i32, c: [u8; 4]) {
-    for dy in -r..=r {
-        for dx in -r..=r {
-            if dx * dx + dy * dy <= r * r {
-                let x = cx + dx;
-                let y = cy + dy;
-                if x >= 0 && x < w as i32 && y >= 0 && y < w as i32 {
-                    let i = ((y as u32 * w + x as u32) * 4) as usize;
-                    pixels[i..i + 4].copy_from_slice(&c);
-                }
             }
         }
     }
@@ -202,46 +175,6 @@ fn generate_icon(size: u32) -> Vec<u8> {
         slant_bottom,
         slant_bottom,
         COL_FG,
-    );
-
-    // 4. 底部装饰圆点（表示多个配置实例）
-    let dot_y = (28.0 * scale) as i32;
-    let dot_r = (1.5 * scale) as i32;
-    fill_circle(
-        &mut px,
-        size,
-        (10.0 * scale) as i32,
-        dot_y,
-        dot_r,
-        COL_PRIMARY,
-    );
-    fill_circle(
-        &mut px,
-        size,
-        (16.0 * scale) as i32,
-        dot_y,
-        dot_r,
-        COL_PRIMARY_LIGHT,
-    );
-    fill_circle(
-        &mut px,
-        size,
-        (22.0 * scale) as i32,
-        dot_y,
-        dot_r,
-        COL_ACCENT,
-    );
-
-    // 5. 顶部装饰线
-    let line_y = (3.0 * scale) as i32;
-    fill_rect(
-        &mut px,
-        size,
-        (8.0 * scale) as i32,
-        line_y,
-        (24.0 * scale) as i32,
-        line_y,
-        COL_PRIMARY,
     );
 
     px
