@@ -40,9 +40,9 @@ jobs:
       - name: Upload Artifact(Actions 页面下载用)
         uses: actions/upload-artifact@v7
         with:
-          name: frpdesk.exe
+          name: frpcdesk.exe
           # 提取编译好的可执行文件作为制品供下载
-          path: target/release/frpdesk.exe
+          path: target/release/frpcdesk.exe
           # 设置产物的保留天数
           retention-days: 7
           
@@ -52,6 +52,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           # 指定要上传到 Release 的文件路径
-          files: target/release/frpdesk.exe
+          files: target/release/frpcdesk.exe
           # 自动根据两个 tag 之间的 commit 记录生成 Release Note
           generate_release_notes: true 

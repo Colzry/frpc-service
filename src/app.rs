@@ -804,14 +804,14 @@ pub fn run_app(pre_check: PreCheckResult) {
         theme::load_all_themes(cx);
         let saved_theme = theme::load_theme_preference();
         theme::apply_theme(&saved_theme, cx);
-        let bounds = Bounds::centered(None, size(px(960.0), px(600.0)), cx);
+        let bounds = Bounds::centered(None, size(px(930.0), px(600.0)), cx);
         let init = pre_check.clone();
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(960.0), px(720.0))),
+                window_min_size: Some(size(px(930.0), px(720.0))),
                 titlebar: Some(TitlebarOptions {
-                    title: Some(SharedString::from("FrpDesk")),
+                    title: Some(SharedString::from("FrpcDesk")),
                     ..Default::default()
                 }),
                 ..Default::default()

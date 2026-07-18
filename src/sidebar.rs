@@ -39,7 +39,7 @@ pub fn render(view: &AppView, cx: &mut Context<AppView>) -> gpui::AnyElement {
 
     div()
         .id("sidebar")
-        .w(px(150.0))
+        .w(px(120.0))
         .h_full()
         .bg(cx.theme().sidebar)
         .flex()
@@ -58,7 +58,7 @@ pub fn render(view: &AppView, cx: &mut Context<AppView>) -> gpui::AnyElement {
                         .text_sm()
                         .font_weight(FontWeight::BOLD)
                         .text_color(cx.theme().sidebar_foreground)
-                        .child("FrpDesk"),
+                        .child("FrpcDesk"),
                 )
                 .child(
                     div()
