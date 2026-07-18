@@ -5,6 +5,14 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+/// frpc 代理信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrpcProxyInfo {
+    pub proxy_type: String,
+    pub local_port: Option<u16>,
+    pub remote_port: Option<u16>,
+}
+
 /// 单个 frpc 配置的元数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrpcConfigMeta {
@@ -13,6 +21,12 @@ pub struct FrpcConfigMeta {
     /// 是否开机自启
     #[serde(default)]
     pub auto_start: bool,
+    /// 服务器地址
+    #[serde(default)]
+    pub server_addr: String,
+    /// 代理列表
+    #[serde(default)]
+    pub proxies: Vec<FrpcProxyInfo>,
 }
 
 /// 所有配置的元数据集合
@@ -150,12 +164,61 @@ fn save_configs(configs: &[FrpcConfigMeta]) -> Result<()> {
     Ok(())
 }
 
+/// 验证 TOML 格式并提取 serverAddr 和 proxies 信息
+pub fn validate_toml(content: &str) -> Result<(String, Vec<FrpcProxyInfo>)> {
+    let value: toml::Value =
+        toml::from_str(content).map_err(|e| anyhow::anyhow!("TOML 格式不正确: {}", e))?;
+
+    let server_addr = value
+        .get("serverAddr")
+        .or_else(|| value.get("server_addr"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let mut proxies = Vec::new();
+    if let Some(arr) = value.get("proxies").and_then(|v| v.as_array()) {
+        for item in arr {
+            let proxy_type = item
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("tcp")
+                .to_string();
+            let local_port = item
+                .get("localPort")
+                .or_else(|| item.get("local_port"))
+                .and_then(|v| v.as_integer())
+                .map(|v| v as u16);
+            let remote_port = item
+                .get("remotePort")
+                .or_else(|| item.get("remote_port"))
+                .and_then(|v| v.as_integer())
+                .map(|v| v as u16);
+            proxies.push(FrpcProxyInfo {
+                proxy_type,
+                local_port,
+                remote_port,
+            });
+        }
+    }
+
+    Ok((server_addr, proxies))
+}
+
 /// 添加或更新一个配置
 ///
 /// - `name`: 配置名称
 /// - `toml_content`: frpc.toml 的内容
 /// - `auto_start`: 是否开机自启
-pub fn save_config(name: &str, toml_content: &str, auto_start: bool) -> Result<()> {
+/// - `server_addr`: 服务器地址
+/// - `proxies`: 代理列表
+pub fn save_config(
+    name: &str,
+    toml_content: &str,
+    auto_start: bool,
+    server_addr: &str,
+    proxies: Vec<FrpcProxyInfo>,
+) -> Result<()> {
     // 1. 写入 toml 文件
     let dir = conf_dir()?;
     fs::create_dir_all(&dir).context("无法创建 conf 目录")?;
@@ -166,10 +229,14 @@ pub fn save_config(name: &str, toml_content: &str, auto_start: bool) -> Result<(
     let mut configs = load_configs().unwrap_or_default();
     if let Some(existing) = configs.iter_mut().find(|c| c.name == name) {
         existing.auto_start = auto_start;
+        existing.server_addr = server_addr.to_string();
+        existing.proxies = proxies;
     } else {
         configs.push(FrpcConfigMeta {
             name: name.to_string(),
             auto_start,
+            server_addr: server_addr.to_string(),
+            proxies,
         });
     }
     save_configs(&configs)?;

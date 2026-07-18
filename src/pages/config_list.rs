@@ -1,12 +1,14 @@
 //! 配置列表页面：卡片网格展示所有配置，支持分页（每页最多8个配置 + 1个添加卡 = 9个，3行×3列）
 
+use crate::config::FrpcConfigMeta;
 use crate::icons::AppIcon;
 use crate::message;
+use crate::message::MessageLevel;
 use gpui::prelude::*;
-use gpui::{div, px, FontWeight};
+use gpui::{div, px, ClipboardItem, FontWeight};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::spinner::Spinner;
-use gpui_component::{ActiveTheme, Disableable};
+use gpui_component::{ActiveTheme, Disableable, Sizable, Size};
 
 use crate::app::AppView;
 
@@ -78,16 +80,15 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
         .pb(px(16.0));
 
     for config_item in &page_configs {
-        let name = config_item.name.clone();
-        let is_running = running_keys.contains(&name);
-        let card = render_config_card(&name, is_running, cx);
+        let is_running = running_keys.contains(&config_item.name);
+        let card = render_config_card(config_item, is_running, cx);
         grid = grid.child(card);
     }
 
     // 添加配置的虚线卡片（始终显示在最后）
     let add_card = div()
         .w(px(240.0))
-        .h(px(140.0))
+        .h(px(180.0))
         .rounded(px(8.0))
         .border_2()
         .border_dashed()
@@ -123,7 +124,7 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
     let remainder = total_items % 3;
     if remainder != 0 {
         for _ in 0..(3 - remainder) {
-            grid = grid.child(div().w(px(240.0)).h(px(140.0)));
+            grid = grid.child(div().w(px(240.0)).h(px(180.0)));
         }
     }
 
@@ -205,28 +206,68 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
         .into_any_element()
 }
 
-fn render_config_card(name: &str, is_running: bool, cx: &mut Context<AppView>) -> gpui::AnyElement {
-    let name_for_action = name.to_string();
-    let name_for_edit = name.to_string();
-    let name_for_delete = name.to_string();
+fn render_config_card(
+    meta: &FrpcConfigMeta,
+    is_running: bool,
+    cx: &mut Context<AppView>,
+) -> gpui::AnyElement {
+    let name = meta.name.clone();
+    let name_for_action = name.clone();
+    let name_for_edit = name.clone();
+    let name_for_delete = name.clone();
+
+    let status_text = if is_running { "运行中" } else { "未启动" };
+    let status_color = if is_running {
+        cx.theme().success
+    } else {
+        cx.theme().danger
+    };
+
+    let server_addr_display = if meta.server_addr.is_empty() {
+        "未配置服务器".to_string()
+    } else {
+        meta.server_addr.clone()
+    };
+    let server_addr_raw = meta.server_addr.clone();
+    let can_copy = !server_addr_raw.is_empty();
+
+    // 构建代理显示数据
+    let mut proxy_items: Vec<(String, String, String)> = Vec::new();
+    for proxy in meta.proxies.iter().take(2) {
+        let ptype = if proxy.proxy_type.is_empty() {
+            "tcp".to_string()
+        } else {
+            proxy.proxy_type.clone()
+        };
+        let local = proxy
+            .local_port
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "?".to_string());
+        let remote = proxy
+            .remote_port
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "?".to_string());
+        proxy_items.push((ptype, local, remote));
+    }
+    let has_more = meta.proxies.len() > 2;
+    let proxy_empty = meta.proxies.is_empty();
 
     div()
         .w(px(240.0))
-        .h(px(140.0))
+        .h(px(180.0))
         .rounded(px(8.0))
         .border_1()
         .border_color(cx.theme().border)
         .bg(cx.theme().sidebar)
-        .p(px(16.0))
+        .p(px(12.0))
         .flex()
         .flex_col()
-        .justify_between()
-        // 第一行：名称 + 状态点
+        .gap_y(px(4.0))
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap_x(px(8.0))
+                .justify_between()
                 .child(
                     div()
                         .flex_1()
@@ -236,31 +277,126 @@ fn render_config_card(name: &str, is_running: bool, cx: &mut Context<AppView>) -
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .child(name.to_string()),
+                        .child(name.clone()),
                 )
                 .child(
                     div()
-                        .w(px(8.0))
-                        .h(px(8.0))
-                        .rounded(px(4.0))
-                        .bg(if is_running {
-                            cx.theme().success
-                        } else {
-                            cx.theme().danger
-                        }),
+                        .flex()
+                        .items_center()
+                        .gap_x(px(6.0))
+                        .child(div().text_xs().text_color(status_color).child(status_text))
+                        .child(
+                            div()
+                                .w(px(8.0))
+                                .h(px(8.0))
+                                .rounded(px(4.0))
+                                .bg(status_color),
+                        ),
                 ),
         )
-        // 第二行：启停/重启按钮
+        // 分割线
+        .child(div().w_full().h(px(1.0)).bg(cx.theme().border))
+        .child({
+            let sa = server_addr_raw.clone();
+            div().w_full().flex().justify_center().child(
+                Button::new(format!("btn-copy-sa-{}", name))
+                    .ghost()
+                    .with_size(Size::XSmall)
+                    .compact()
+                    .label(server_addr_display)
+                    .when(can_copy, |b| {
+                        b.on_click(cx.listener(move |view, _event, _window, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(sa.clone()));
+                            view.set_status_message(
+                                format!("已复制：{}", sa),
+                                MessageLevel::Success,
+                                cx,
+                            );
+                        }))
+                    }),
+            )
+        })
+        // 分割线
+        .child(div().w_full().h(px(1.0)).bg(cx.theme().border))
+        .child({
+            let mut section = div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_y(px(2.0));
+
+            if proxy_empty {
+                section = section.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("无代理配置"),
+                );
+            } else {
+                for (ptype, local, remote) in &proxy_items {
+                    let ptype = ptype.clone();
+                    let local = local.clone();
+                    let remote = remote.clone();
+                    let sa = server_addr_raw.clone();
+                    let remote_for_copy = remote.clone();
+                    let btn_id = format!("btn-copy-remote-{}-{}-{}", name, ptype, local);
+                    section = section.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("{} {}->", ptype, local)),
+                            )
+                            .child(
+                                Button::new(btn_id)
+                                    .ghost()
+                                    .with_size(Size::XSmall)
+                                    .compact()
+                                    .label(remote)
+                                    .when(can_copy, |b| {
+                                        b.on_click(cx.listener(move |view, _event, _window, cx| {
+                                            let copy_text = format!("{}:{}", sa, remote_for_copy);
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copy_text.clone(),
+                                            ));
+                                            view.set_status_message(
+                                                format!("已复制：{}", copy_text),
+                                                MessageLevel::Success,
+                                                cx,
+                                            );
+                                        }))
+                                    }),
+                            ),
+                    );
+                }
+                if has_more {
+                    section = section.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("..."),
+                    );
+                }
+            }
+
+            section
+        })
+        // 分割线
+        .child(div().w_full().h(px(1.0)).bg(cx.theme().border))
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap_x(px(6.0))
-                .child(if is_running {
+                .w_full()
+                .child(div().flex_1().flex().justify_center().child(if is_running {
                     Button::new(format!("btn-stop-{}", name))
                         .danger()
                         .icon(AppIcon::Square)
-                        .label("停止")
                         .on_click(cx.listener(move |view, _event, _window, cx| {
                             view.stop_config(&name_for_action, cx);
                         }))
@@ -269,47 +405,32 @@ fn render_config_card(name: &str, is_running: bool, cx: &mut Context<AppView>) -
                     Button::new(format!("btn-start-{}", name))
                         .success()
                         .icon(AppIcon::Play)
-                        .label("启动")
                         .on_click(cx.listener(move |view, _event, _window, cx| {
                             view.start_config(&name_for_action, cx);
                         }))
                         .into_any_element()
-                })
-                .when(is_running, |el| {
-                    let name_for_restart = name.to_string();
-                    el.child(
-                        Button::new(format!("btn-restart-{}", name))
-                            .icon(AppIcon::RotateCcw)
-                            .label("重启")
-                            .on_click(cx.listener(move |view, _event, _window, cx| {
-                                view.restart_config(&name_for_restart, cx);
+                }))
+                .child(div().w(px(1.0)).h(px(16.0)).bg(cx.theme().border))
+                .child(
+                    div().flex_1().flex().justify_center().child(
+                        Button::new(format!("btn-edit-{}", name))
+                            .ghost()
+                            .icon(AppIcon::SquarePen)
+                            .on_click(cx.listener(move |view, _event, window, cx| {
+                                view.open_edit_config(&name_for_edit, window, cx);
                             })),
-                    )
-                }),
-        )
-        // 第三行：编辑/删除
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_x(px(4.0))
-                .child(
-                    Button::new(format!("btn-edit-{}", name))
-                        .ghost()
-                        .icon(AppIcon::SquarePen)
-                        .label("编辑")
-                        .on_click(cx.listener(move |view, _event, window, cx| {
-                            view.open_edit_config(&name_for_edit, window, cx);
-                        })),
+                    ),
                 )
+                .child(div().w(px(1.0)).h(px(16.0)).bg(cx.theme().border))
                 .child(
-                    Button::new(format!("btn-delete-{}", name))
-                        .ghost()
-                        .icon(AppIcon::Trash)
-                        .label("删除")
-                        .on_click(cx.listener(move |view, _event, _window, cx| {
-                            view.delete_config(&name_for_delete, cx);
-                        })),
+                    div().flex_1().flex().justify_center().child(
+                        Button::new(format!("btn-delete-{}", name))
+                            .ghost()
+                            .icon(AppIcon::Trash)
+                            .on_click(cx.listener(move |view, _event, _window, cx| {
+                                view.delete_config(&name_for_delete, cx);
+                            })),
+                    ),
                 ),
         )
         .into_any_element()

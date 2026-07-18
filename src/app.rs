@@ -296,7 +296,21 @@ impl AppView {
                 let _ = config::delete_config(orig);
             }
         }
-        match config::save_config(&name, &self.edit_content, self.edit_auto_start) {
+        // 验证 TOML 格式并提取配置信息
+        let (server_addr, proxies) = match config::validate_toml(&self.edit_content) {
+            Ok(result) => result,
+            Err(e) => {
+                self.set_status_message(format!("保存失败：{}", e), MessageLevel::Error, cx);
+                return;
+            }
+        };
+        match config::save_config(
+            &name,
+            &self.edit_content,
+            self.edit_auto_start,
+            &server_addr,
+            proxies,
+        ) {
             Ok(()) => {
                 self.reload_configs(cx);
                 self.switch_page_with_message(
@@ -490,117 +504,6 @@ impl AppView {
             })
             .detach();
         }
-    }
-
-    pub fn restart_config(&mut self, name: &str, cx: &mut Context<Self>) {
-        if let Some(mut rp) = self.running.remove(name) {
-            log::info!("[{}] 正在重启，先停止当前进程", name);
-            let _ = rp.process.stop();
-        }
-        // 检查 frpc.exe 是否存在
-        if !crate::download::has_frpc_executable(
-            &std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-                .unwrap_or_else(|| std::path::PathBuf::from(".")),
-        ) {
-            self.set_status_message(
-                "请先在设置中下载 frpc 程序".to_string(),
-                MessageLevel::Warning,
-                cx,
-            );
-            return;
-        }
-        let n = name.to_string();
-        self.is_processing = true;
-        self.status_message = None;
-        cx.notify();
-
-        // 创建通道用于检测 frpc 连接成功
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        let task: Task<Result<FrpcProcess>> = cx
-            .background_spawn(async move { service::start_frpc_process_with_sender(&n, Some(tx)) });
-        let nc = name.to_string();
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            this.update(cx, |view, cx| {
-                view.is_processing = false;
-                match result {
-                    Ok(p) => {
-                        log::info!("[{}] frpc 重启成功", nc);
-                        view.running
-                            .insert(nc.clone(), RunningProcess { process: p });
-                        view.set_status_message(format!("'{}'已重启", nc), MessageLevel::Info, cx);
-                        cx.notify();
-
-                        // 启动后台任务监听连接成功
-                        let name_for_toast = nc.clone();
-                        cx.spawn(async move |this, cx| {
-                            let connected = cx
-                                .background_spawn(async move {
-                                    rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok()
-                                })
-                                .await;
-                            if connected {
-                                this.update(cx, |view, cx| {
-                                    if view.running.contains_key(&name_for_toast) {
-                                        view.set_status_message(
-                                            format!("'{}' 连接成功", name_for_toast),
-                                            MessageLevel::Success,
-                                            cx,
-                                        );
-                                    }
-                                })
-                                .ok();
-                            }
-                        })
-                        .detach();
-
-                        // 500ms 后检查进程是否立即退出（如配置解析错误）
-                        let name_check = nc.clone();
-                        cx.spawn(async move |this, cx| {
-                            cx.background_spawn(async {
-                                std::thread::sleep(Duration::from_millis(500));
-                            })
-                            .await;
-                            this.update(cx, |view, cx| {
-                                if let Some(rp) = view.running.get_mut(&name_check) {
-                                    if let Some(status) = rp.process.check_exit_status() {
-                                        log::error!(
-                                            "[{}] 重启后立即退出，退出码: {}",
-                                            name_check,
-                                            status
-                                        );
-                                        view.running.remove(&name_check);
-                                        view.set_status_message(
-                                            format!(
-                                                "'{}' 重启失败，请检查配置是否正确 (退出码: {})",
-                                                name_check, status
-                                            ),
-                                            MessageLevel::Error,
-                                            cx,
-                                        );
-                                    }
-                                }
-                            })
-                            .ok();
-                        })
-                        .detach();
-                    }
-                    Err(e) => {
-                        log::error!("[{}] 重启失败: {}", nc, e);
-                        view.set_status_message(
-                            format!("重启失败：{}", e),
-                            MessageLevel::Error,
-                            cx,
-                        );
-                    }
-                }
-            })
-            .ok();
-        })
-        .detach();
     }
 
     pub fn start_download(&mut self, cx: &mut Context<Self>) {

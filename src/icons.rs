@@ -18,7 +18,6 @@ pub enum AppIcon {
     InfoYellow,
     Play,
     Plus,
-    RotateCcw,
     Settings,
     SettingsBlack,
     SettingsLight,
@@ -42,7 +41,6 @@ impl IconNamed for AppIcon {
             Self::InfoYellow => "icons/info-yellow.svg".into(),
             Self::Play => "icons/play.svg".into(),
             Self::Plus => "icons/plus.svg".into(),
-            Self::RotateCcw => "icons/rotate-ccw.svg".into(),
             Self::Settings => "icons/settings.svg".into(),
             Self::SettingsBlack => "icons/settings-black.svg".into(),
             Self::SettingsLight => "icons/settings-light.svg".into(),
@@ -89,9 +87,6 @@ impl gpui::AssetSource for AppAssets {
             )),
             "icons/play.svg" => Some(Cow::Borrowed(include_bytes!("../icons/play.svg") as &[u8])),
             "icons/plus.svg" => Some(Cow::Borrowed(include_bytes!("../icons/plus.svg") as &[u8])),
-            "icons/rotate-ccw.svg" => Some(Cow::Borrowed(
-                include_bytes!("../icons/rotate-ccw.svg") as &[u8],
-            )),
             "icons/settings.svg" => Some(Cow::Borrowed(
                 include_bytes!("../icons/settings.svg") as &[u8]
             )),
