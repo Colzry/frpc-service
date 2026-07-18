@@ -128,7 +128,12 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
         }
     }
 
-    content = content.child(header).child(grid);
+    // 可滚动的内容区域（header 固定，grid + 分页可滚动）
+    let mut scrollable = div()
+        .flex_1()
+        .id("config-list-scroll")
+        .overflow_y_scroll()
+        .child(grid);
 
     // 分页控件
     if total_pages > 1 {
@@ -173,12 +178,12 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
                     })),
             );
 
-        content = content.child(pagination);
+        scrollable = scrollable.child(pagination);
     }
 
     // 处理中指示器
     if view.is_processing {
-        content = content.child(
+        scrollable = scrollable.child(
             div()
                 .mx(px(24.0))
                 .mb(px(16.0))
@@ -194,6 +199,8 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
                 ),
         );
     }
+
+    content = content.child(header).child(scrollable);
 
     div()
         .relative()
