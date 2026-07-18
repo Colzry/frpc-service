@@ -5,17 +5,18 @@
 ## 功能特性
 
 - **多配置管理**：添加、编辑、删除多个 frpc 配置，每个配置独立运行
-- **进程生命周期管理**：启动、停止、重启单个 frpc 实例，实时显示运行状态
+- **进程生命周期管理**：启动、停止单个 frpc 实例，实时显示运行状态
 - **开机自启**：为每个配置单独设置开机自启动，配合 Windows 服务实现无人值守
-- **自动下载 frpc**：首次使用时自动从 GitHub 下载最新版本的 frpc，支持多个国内代理自动切换
+- **自动下载 frpc**：支持从 GitHub 下载最新版本的 frpc，支持多个国内代理自动切换
 - **版本更新检测**：检查 frpc 是否有新版本，一键更新
 - **Windows 服务注册**：将程序注册为 Windows 服务，实现开机自启已配置的 frpc 实例
 - **主题切换**：内置多套主题（亮色 / 暗色 / 海洋蓝 / 暖日落），支持一键切换并持久化
 - **日志管理**：按天自动分割日志，自动清理超过 30 天的旧日志，支持运行中删除日志文件后自动重建
+- **TOML 配置校验**：保存配置时自动校验 TOML 格式，提取 serverAddr、代理类型与端口信息
+- **一键复制**：配置卡片中的服务器地址和远程端口支持点击复制到剪贴板
 - **TOML 代码高亮**：配置编辑器支持 TOML 语法高亮显示
 - **进程守护**：开启后 frpc 进程异常退出时自动重启，支持 UI 模式和服务模式，通过共享文件协调
 - **健康检查**：后台周期性监控 frpc 进程状态，异常退出自动更新界面
-- **单实例运行**：程序只允许运行一个窗口实例
 
 ## 界面预览
 
@@ -40,8 +41,8 @@
 ### 配置管理
 
 - **添加配置**：点击配置列表中的虚线卡片，填写配置名称和 TOML 内容
-- **编辑配置**：点击配置卡片上的 **编辑** 按钮
-- **删除配置**：点击配置卡片上的 **删除** 按钮（会自动停止运行中的实例）
+- **编辑配置**：点击配置卡片上的编辑图标按钮
+- **删除配置**：点击配置卡片上的删除图标按钮（会自动停止运行中的实例）
 - **自启动**：在添加/编辑配置时设置开机自启动开关
 - **分页**：每页最多显示 8 个配置，超过后自动分页
 
@@ -79,10 +80,10 @@ src/
 ├── sidebar.rs              # 侧边栏导航菜单渲染
 ├── pages/
 │   ├── mod.rs              # 页面模块声明
-│   ├── config_list.rs      # 配置列表页面（卡片网格 + 分页）
+│   ├── config_list.rs      # 配置列表页面（卡片网格 + 分页 + 一键复制）
 │   ├── config_editor.rs    # 配置编辑器页面（名称 + TOML 编辑 + 自启动）
 │   └── settings.rs         # 设置页面（frpc 版本、服务、主题、进程守护、日志）
-├── config.rs               # 配置管理（conf/ 目录下的元数据和 TOML 文件）
+├── config.rs               # 配置管理（conf/ 目录下的元数据和 TOML 文件，TOML 校验）
 ├── frpc_mg.rs              # frpc 进程管理（启动、停止、状态监控）
 ├── service.rs              # Windows 服务管理（注册、注销、服务调度器）
 ├── download.rs             # frpc 下载模块（GitHub 代理、zip 解压、版本检查）
@@ -124,6 +125,7 @@ cargo build --release
 
 - [gpui](https://github.com/zed-industries/zed) — Zed 编辑器的 GPU 加速 UI 框架
 - [gpui-component](https://github.com/longbridge/gpui-component) — gpui 组件库（按钮、输入框、下拉列表、Spinner 等）
+- [toml](https://crates.io/crates/toml) — TOML 解析（配置校验与信息提取）
 - [windows-service](https://crates.io/crates/windows-service) — Windows 服务 API 绑定
 - [reqwest](https://crates.io/crates/reqwest) — HTTP 客户端（frpc 下载）
 - [zip](https://crates.io/crates/zip) — ZIP 解压
