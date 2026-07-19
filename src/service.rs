@@ -25,7 +25,7 @@ use windows_sys::Win32::System::Pipes::{
     PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, OpenEventW, SetEvent, WaitForMultipleObjects,
+    CreateEventW, OpenEventW, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
 };
 
 /// 服务停止信号，由 SCM 停止事件设置
@@ -92,6 +92,34 @@ fn signal_named_event(name: &[u16]) {
 /// Called by the UI after toggling process guard.
 pub fn signal_guard_changed() {
     signal_named_event(&guard_event_name());
+}
+
+/// "Global\FrpcProcessChanged" as UTF-16 with null terminator
+fn process_changed_event_name() -> Vec<u16> {
+    "Global\\FrpcProcessChanged\0".encode_utf16().collect()
+}
+
+/// Signal the process changed event to wake up the UI.
+/// Called by the service after restarting a process via guard.
+pub fn signal_process_changed() {
+    signal_named_event(&process_changed_event_name());
+}
+
+/// Wait for the process changed event or timeout.
+/// Returns true if the event was signaled, false if timed out.
+/// Used by the UI health monitor to react immediately to service restarts.
+pub fn wait_process_changed(timeout_ms: u32) -> bool {
+    const SYNCHRONIZE: u32 = 0x00100000;
+    unsafe {
+        let event = OpenEventW(SYNCHRONIZE, 0, process_changed_event_name().as_ptr());
+        if event == 0 {
+            std::thread::sleep(Duration::from_millis(timeout_ms as u64));
+            return false;
+        }
+        let result = WaitForSingleObject(event, timeout_ms);
+        CloseHandle(event);
+        result == WAIT_OBJECT_0
+    }
 }
 
 /// UI 调用：通过命名管道向 Service 发送命令
@@ -511,6 +539,7 @@ fn run_service() -> Result<()> {
 
     // 创建跨进程命名事件，UI 可通过信号通知服务
     let guard_event = create_named_event(&guard_event_name(), "进程守护")?;
+    let process_changed_event = create_named_event(&process_changed_event_name(), "进程状态变更")?;
 
     // 通过命名管道接收 UI 的命令（STOP/START/CLEAR/TRACK）
     let guard_stopped: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
@@ -525,6 +554,7 @@ fn run_service() -> Result<()> {
             log::info!("收到服务停止信号");
             unsafe {
                 CloseHandle(guard_event);
+                CloseHandle(process_changed_event);
             }
             set_service_status(&status_handle, ServiceState::Stopped)?;
             return Ok(());
@@ -612,6 +642,8 @@ fn run_service() -> Result<()> {
                     }
                 }
             }
+            // 通知 UI 更新界面显示
+            signal_process_changed();
         }
     }
 }

@@ -808,10 +808,15 @@ impl AppView {
         cx.spawn(async move |this, cx| {
             let mut discover_tick: u32 = 0;
             loop {
-                cx.background_spawn(async {
-                    std::thread::sleep(Duration::from_secs(3));
-                })
-                .await;
+                // 等待进程状态变更事件，超时 3 秒后执行健康检查
+                // 如果 Service 重启了进程，事件会被立即信号化，UI 马上更新
+                let signaled = cx
+                    .background_spawn(async { service::wait_process_changed(3000) })
+                    .await;
+                if signaled {
+                    // Service 重启了进程，立即触发发现
+                    discover_tick = 3;
+                }
                 let alive = this
                     .update(cx, |view, cx| {
                         // Step 1: 检查已跟踪的进程是否仍然存活
