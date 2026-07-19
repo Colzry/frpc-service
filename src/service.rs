@@ -8,11 +8,21 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::{
     InitializeSecurityDescriptor, SetSecurityDescriptorDacl, SECURITY_ATTRIBUTES,
     SECURITY_DESCRIPTOR,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE,
+    OPEN_EXISTING, PIPE_ACCESS_INBOUND,
+};
+use windows_sys::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
+    PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
     CreateEventW, OpenEventW, SetEvent, WaitForMultipleObjects,
@@ -25,15 +35,18 @@ static SERVICE_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 const EVENT_MODIFY_STATE: u32 = 0x0002;
 const WAIT_OBJECT_0: u32 = 0;
 const WAIT_TIMEOUT: u32 = 0x102;
+const GENERIC_WRITE: u32 = 0x40000000;
+
+/// Named pipe for guard_stopped IPC: UI sends STOP/START/CLEAR commands
+const PIPE_NAME: &str = "\\\\.\\pipe\\FrpcGuardStopped";
+
+fn pipe_name_utf16() -> Vec<u16> {
+    PIPE_NAME.encode_utf16().chain(std::iter::once(0)).collect()
+}
 
 /// "Global\FrpcGuardChanged" as UTF-16 with null terminator
 fn guard_event_name() -> Vec<u16> {
     "Global\\FrpcGuardChanged\0".encode_utf16().collect()
-}
-
-/// "Global\FrpcGuardStoppedChanged" as UTF-16 with null terminator
-fn guard_stopped_event_name() -> Vec<u16> {
-    "Global\\FrpcGuardStoppedChanged\0".encode_utf16().collect()
 }
 
 /// Create a named event with NULL DACL (allows cross-session access)
@@ -81,10 +94,182 @@ pub fn signal_guard_changed() {
     signal_named_event(&guard_event_name());
 }
 
-/// Signal the guard stopped list change event to wake up the service.
-/// Called by the UI after modifying guard_stopped.json.
-pub fn signal_guard_stopped_changed() {
-    signal_named_event(&guard_stopped_event_name());
+/// UI 调用：通过命名管道向 Service 发送命令
+///
+/// 命令格式：
+/// - `STOP:config_name` — 将配置加入手动停止列表
+/// - `START:config_name` — 将配置从手动停止列表移除
+/// - `CLEAR` — 清空手动停止列表
+/// - `TRACK:config_name:pid` — 通知 Service 将 UI 启动的进程纳入守护跟踪
+pub fn send_guard_stopped_command(command: &str) {
+    // 重试 3 次，每次间隔 50ms，应对管道短暂不可用的情况
+    // （DisconnectNamedPipe 到下一次 CreateNamedPipeW 之间的间隙）
+    for attempt in 0..3u32 {
+        unsafe {
+            let handle = CreateFileW(
+                pipe_name_utf16().as_ptr(),
+                GENERIC_WRITE,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                0,
+            );
+            if handle == INVALID_HANDLE_VALUE {
+                if attempt < 2 {
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+                log::error!(
+                    "无法连接到命名管道 {}（已重试 {} 次）",
+                    PIPE_NAME,
+                    attempt + 1
+                );
+                return;
+            }
+            let data = format!("{}\n", command);
+            let mut bytes_written = 0u32;
+            WriteFile(
+                handle,
+                data.as_ptr(),
+                data.len() as u32,
+                &mut bytes_written,
+                std::ptr::null_mut(),
+            );
+            FlushFileBuffers(handle);
+            CloseHandle(handle);
+            return;
+        }
+    }
+}
+
+/// 创建命名管道服务器（带 NULL DACL，允许跨会话访问）
+fn create_named_pipe_server() -> Result<HANDLE> {
+    let mut sd: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+    unsafe {
+        if InitializeSecurityDescriptor(&mut sd as *mut _ as *mut _, 1) == 0 {
+            return Err(anyhow::anyhow!("无法初始化安全描述符"));
+        }
+        if SetSecurityDescriptorDacl(&mut sd as *mut _ as *mut _, 1, std::ptr::null(), 0) == 0 {
+            return Err(anyhow::anyhow!("无法设置安全描述符 DACL"));
+        }
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: &mut sd as *mut _ as *mut _,
+            bInheritHandle: 0,
+        };
+        let handle = CreateNamedPipeW(
+            pipe_name_utf16().as_ptr(),
+            PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            1,
+            0,
+            4096,
+            0,
+            &sa,
+        );
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(anyhow::anyhow!("无法创建命名管道"));
+        }
+        Ok(handle)
+    }
+}
+
+/// 启动命名管道监听线程，接收 UI 发送的命令（STOP/START/CLEAR/TRACK）
+fn start_guard_stopped_pipe(
+    guard_stopped: Arc<Mutex<HashSet<String>>>,
+    processes: Arc<Mutex<Vec<(String, FrpcProcess)>>>,
+    auto_start_map: Arc<std::collections::HashMap<String, (PathBuf, PathBuf)>>,
+) {
+    thread::spawn(move || {
+        loop {
+            let pipe = match create_named_pipe_server() {
+                Ok(h) => h,
+                Err(e) => {
+                    log::error!("创建命名管道失败: {:?}", e);
+                    thread::sleep(Duration::from_secs(1));
+                    continue;
+                }
+            };
+
+            // 等待客户端连接
+            if unsafe { ConnectNamedPipe(pipe, std::ptr::null_mut()) } == 0 {
+                let err = unsafe { GetLastError() };
+                // ERROR_PIPE_CONNECTED (535) 也算连接成功
+                if err != 535 {
+                    unsafe { CloseHandle(pipe) };
+                    continue;
+                }
+            }
+
+            // 读取数据
+            let mut buffer = [0u8; 4096];
+            let mut bytes_read = 0u32;
+            let success = unsafe {
+                ReadFile(
+                    pipe,
+                    buffer.as_mut_ptr(),
+                    buffer.len() as u32,
+                    &mut bytes_read,
+                    std::ptr::null_mut(),
+                )
+            };
+
+            if success != 0 && bytes_read > 0 {
+                let data = String::from_utf8_lossy(&buffer[..bytes_read as usize]);
+                for line in data.lines() {
+                    let line = line.trim();
+                    if let Some(name) = line.strip_prefix("STOP:") {
+                        let mut gs = guard_stopped.lock().unwrap();
+                        gs.insert(name.to_string());
+                        log::info!("[{}] 已加入手动停止列表（管道）", name);
+                    } else if let Some(name) = line.strip_prefix("START:") {
+                        let mut gs = guard_stopped.lock().unwrap();
+                        gs.remove(name);
+                        log::info!("[{}] 已从手动停止列表移除（管道）", name);
+                    } else if line == "CLEAR" {
+                        let mut gs = guard_stopped.lock().unwrap();
+                        gs.clear();
+                        log::info!("手动停止列表已清空（管道）");
+                    } else if let Some(remainder) = line.strip_prefix("TRACK:") {
+                        // UI 启动了进程，通知 Service 纳入守护跟踪
+                        // 格式: TRACK:config_name:pid
+                        if let Some((name, pid_str)) = remainder.split_once(':') {
+                            if let Ok(pid) = pid_str.parse::<u32>() {
+                                if let Some((exe, conf)) = auto_start_map.get(name) {
+                                    let mut proc_list = processes.lock().unwrap();
+                                    // 已在跟踪列表中，跳过
+                                    if proc_list.iter().any(|(n, _)| n == name) {
+                                        log::debug!("[{}] 已在守护跟踪列表中，跳过", name);
+                                    } else {
+                                        let process = FrpcProcess::from_pid(
+                                            pid,
+                                            name.to_string(),
+                                            exe.clone(),
+                                            conf.clone(),
+                                        );
+                                        proc_list.push((name.to_string(), process));
+                                        log::info!(
+                                            "[{}] UI 通知 TRACK (PID: {})，已纳入守护跟踪",
+                                            name,
+                                            pid
+                                        );
+                                    }
+                                } else {
+                                    log::debug!("[{}] 不在自启动列表中，跳过 TRACK", name);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            unsafe {
+                DisconnectNamedPipe(pipe);
+                CloseHandle(pipe);
+            }
+        }
+    });
 }
 use windows_service::service::{
     ServiceAccess, ServiceControlAccept, ServiceErrorControl, ServiceExitCode, ServiceInfo,
@@ -306,13 +491,144 @@ fn run_service() -> Result<()> {
 
     let mut settings = config::load_settings();
 
-    // 启动所有自启动配置（跳过已运行的）
+    // 服务启动时始终启动所有自启动配置（进程守护只负责崩溃后重启）
+    // processes 共享给管道线程（TRACK 命令需要添加进程）
+    let processes: Arc<Mutex<Vec<(String, FrpcProcess)>>> =
+        Arc::new(Mutex::new(start_auto_start_processes()));
+
+    {
+        let proc_list = processes.lock().unwrap();
+        log::info!(
+            "服务已启动，进程守护: {}，已跟踪 {} 个进程",
+            settings.process_guard,
+            proc_list.len()
+        );
+    }
+    set_service_status(&status_handle, ServiceState::Running)?;
+
+    // auto_start_map 共享给管道线程（TRACK 命令需要查找 exe/conf）
+    let auto_start_map = Arc::new(discover_auto_start_map());
+
+    // 创建跨进程命名事件，UI 可通过信号通知服务
+    let guard_event = create_named_event(&guard_event_name(), "进程守护")?;
+
+    // 通过命名管道接收 UI 的命令（STOP/START/CLEAR/TRACK）
+    let guard_stopped: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    start_guard_stopped_pipe(
+        Arc::clone(&guard_stopped),
+        Arc::clone(&processes),
+        Arc::clone(&auto_start_map),
+    );
+
+    loop {
+        if SERVICE_STOP_REQUESTED.load(Ordering::SeqCst) {
+            log::info!("收到服务停止信号");
+            unsafe {
+                CloseHandle(guard_event);
+            }
+            set_service_status(&status_handle, ServiceState::Stopped)?;
+            return Ok(());
+        }
+
+        // 使用命名事件等待 1 秒，替代 thread::sleep
+        // - WAIT_OBJECT_0: guard_event 信号化（进程守护开关切换）
+        // - WAIT_TIMEOUT: 超时，继续检查进程状态
+        let wait_result = unsafe { WaitForMultipleObjects(1, [guard_event].as_ptr(), 0, 1000) };
+        match wait_result {
+            WAIT_OBJECT_0 => {
+                settings.process_guard = !settings.process_guard;
+                log::info!(
+                    "收到进程守护变更信号，process_guard={}",
+                    settings.process_guard
+                );
+                // 开启进程守护时，清理已在守护关闭期间退出的进程
+                // 只监控开启后存活的进程，避免重启之前已死的进程
+                if settings.process_guard {
+                    let mut proc_list = processes.lock().unwrap();
+                    let before = proc_list.len();
+                    proc_list.retain(|(_, proc)| FrpcProcess::is_pid_running(proc.pid()));
+                    let after = proc_list.len();
+                    if before != after {
+                        log::info!(
+                            "进程守护已开启，清理 {} 个已退出进程，当前跟踪 {} 个",
+                            before - after,
+                            after
+                        );
+                    } else {
+                        log::info!("进程守护已开启，当前跟踪 {} 个进程", after);
+                    }
+                }
+            }
+            WAIT_TIMEOUT => {} // 超时，继续检查进程状态
+            _ => {
+                log::error!("WaitForMultipleObjects 返回未知状态: {}", wait_result);
+            }
+        }
+
+        // 进程守护未开启时，不监控不重启
+        if !settings.process_guard {
+            continue;
+        }
+
+        // 进程守护开启：检查是否有进程退出并重启
+        // Phase 1: 检测已退出的进程，构建重启候选列表
+        let mut restart_list = Vec::new();
+        {
+            let gs = guard_stopped.lock().unwrap();
+            let mut proc_list = processes.lock().unwrap();
+            proc_list.retain(|(name, proc)| {
+                if FrpcProcess::is_pid_running(proc.pid()) {
+                    true
+                } else {
+                    if gs.contains(name) {
+                        log::info!("[{}] 进程已退出（UI 手动停止，不重启）", name);
+                    } else {
+                        // 暂不重启，等 grace period 后再确认
+                        log::info!("[{}] 进程已退出，等待确认后重启", name);
+                        restart_list.push(name.clone());
+                    }
+                    false
+                }
+            });
+        }
+
+        // Phase 2: 等待 500ms 给 STOP 命令到达的时间，然后重新检查 guard_stopped
+        if !restart_list.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let gs = guard_stopped.lock().unwrap();
+            let mut proc_list = processes.lock().unwrap();
+            for name in &restart_list {
+                if gs.contains(name) {
+                    log::info!("[{}] 等待期间收到停止命令，取消重启", name);
+                    continue;
+                }
+                if let Some((exe, conf)) = auto_start_map.get(name) {
+                    match FrpcProcess::start(name.clone(), exe.clone(), conf.clone(), None) {
+                        Ok(p) => {
+                            log::info!("[{}] 进程守护重启成功", name);
+                            proc_list.push((name.clone(), p));
+                        }
+                        Err(e) => log::error!("[{}] 进程守护重启失败: {:?}", name, e),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 启动所有自启动配置（跳过已运行的），返回进程列表
+fn start_auto_start_processes() -> Vec<(String, FrpcProcess)> {
     let running_frpc = discover_running_frpc_processes();
-    let instances = discover_auto_start_instances()?;
-    let mut processes: Vec<(String, FrpcProcess)> = Vec::new();
+    let instances = match discover_auto_start_instances() {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("发现自启动配置失败: {:?}", e);
+            return Vec::new();
+        }
+    };
+    let mut processes = Vec::new();
     for (id, exe, conf) in instances {
         if let Some((_, pid)) = running_frpc.iter().find(|(n, _)| n == &id) {
-            // 已有进程在运行，直接跟踪
             if FrpcProcess::is_pid_running(*pid) {
                 let process = FrpcProcess::from_pid(*pid, id.clone(), exe, conf);
                 log::info!("[{}] 检测到已运行的进程 (PID: {})", id, pid);
@@ -328,104 +644,12 @@ fn run_service() -> Result<()> {
             Err(e) => log::error!("启动 frpc 实例失败: {:?}", e),
         }
     }
-
     if processes.is_empty() {
         log::warn!("没有任何 frpc 进程成功启动");
     } else {
         log::info!("成功启动 {} 个 frpc 实例", processes.len());
     }
-
-    // 服务始终运行，进程守护由设置动态控制
-    log::info!("服务已启动，进程守护: {}", settings.process_guard);
-    set_service_status(&status_handle, ServiceState::Running)?;
-
-    let auto_start_map = discover_auto_start_map();
-
-    // 创建跨进程命名事件，UI 可通过信号通知服务
-    let guard_event = create_named_event(&guard_event_name(), "进程守护")?;
-    let guard_stopped_event = create_named_event(&guard_stopped_event_name(), "手动停止列表")?;
-
-    // 维护内存中的手动停止列表，避免每次检测进程退出时读取文件
-    let mut guard_stopped: HashSet<String> = config::load_guard_stopped().into_iter().collect();
-
-    // 事件句柄数组，用于 WaitForMultipleObjects
-    let handles = [guard_event, guard_stopped_event];
-
-    loop {
-        if SERVICE_STOP_REQUESTED.load(Ordering::SeqCst) {
-            log::info!("收到服务停止信号");
-            unsafe {
-                CloseHandle(guard_event);
-                CloseHandle(guard_stopped_event);
-            }
-            set_service_status(&status_handle, ServiceState::Stopped)?;
-            return Ok(());
-        }
-
-        // 使用命名事件等待 1 秒，替代 thread::sleep
-        // - WAIT_OBJECT_0: guard_event 信号化（进程守护开关切换）
-        // - WAIT_OBJECT_0+1: guard_stopped_event 信号化（手动停止列表变更）
-        // - WAIT_TIMEOUT: 超时，继续检查进程状态
-        let wait_result = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, 1000) };
-        match wait_result {
-            WAIT_OBJECT_0 => {
-                // 进程守护开关切换，直接翻转即可，无需读取文件
-                settings.process_guard = !settings.process_guard;
-                log::info!(
-                    "收到进程守护变更信号，process_guard={}",
-                    settings.process_guard
-                );
-            }
-            1 => {
-                // 手动停止列表变更，重新读取文件更新内存缓存
-                guard_stopped = config::load_guard_stopped().into_iter().collect();
-                log::info!("收到手动停止列表变更信号，已更新缓存");
-            }
-            WAIT_TIMEOUT => {} // 超时，继续检查进程状态
-            _ => {
-                log::error!("WaitForMultipleObjects 返回未知状态: {}", wait_result);
-            }
-        }
-
-        // 进程守护未开启时，不监控不重启
-        if !settings.process_guard {
-            continue;
-        }
-
-        // 进程守护开启：检查是否有进程退出并重启
-        // 直接查询内存中的 guard_stopped HashSet，无需读取文件
-        let mut restart_list = Vec::new();
-        processes.retain(|(name, proc)| {
-            if FrpcProcess::is_pid_running(proc.pid()) {
-                true
-            } else {
-                if guard_stopped.contains(name) {
-                    log::info!("[{}] 进程已退出（UI 手动停止，不重启）", name);
-                } else {
-                    log::warn!("[{}] 进程守护发现进程已退出，将重启", name);
-                    restart_list.push(name.clone());
-                }
-                false
-            }
-        });
-
-        for name in restart_list {
-            // 再次检查内存缓存，防止 UI 在 retain 与 restart 之间发送了信号
-            if guard_stopped.contains(&name) {
-                log::info!("[{}] 已在手动停止列表中，跳过重启", name);
-                continue;
-            }
-            if let Some((exe, conf)) = auto_start_map.get(&name) {
-                match FrpcProcess::start(name.clone(), exe.clone(), conf.clone(), None) {
-                    Ok(p) => {
-                        log::info!("[{}] 进程守护重启成功", name);
-                        processes.push((name, p));
-                    }
-                    Err(e) => log::error!("[{}] 进程守护重启失败: {:?}", name, e),
-                }
-            }
-        }
-    }
+    processes
 }
 
 fn set_service_status(
@@ -516,7 +740,7 @@ pub fn discover_running_frpc_processes() -> Vec<(String, u32)> {
     {
         Ok(o) if !o.stdout.is_empty() => String::from_utf8_lossy(&o.stdout).into_owned(),
         _ => {
-            log::info!("wmic 不可用或无输出，尝试 PowerShell");
+            log::debug!("wmic 不可用或无输出，尝试 PowerShell");
             match std::process::Command::new("powershell")
                 .args(["-NoProfile", "-NonInteractive", "-Command",
                     "Get-CimInstance Win32_Process -Filter \"Name='frpc.exe'\" | Select-Object ProcessId,CommandLine | ConvertTo-CSV -NoTypeInformation"])

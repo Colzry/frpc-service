@@ -379,13 +379,9 @@ impl AppView {
                 }
             }
         }
-        // 从手动停止列表中移除，允许健康检查监控
+        // 从手动停止列表中移除，通过命名管道通知 Service
         self.stopped_configs.remove(name);
-        // 更新共享文件
-        let _ =
-            config::save_guard_stopped(&self.stopped_configs.iter().cloned().collect::<Vec<_>>());
-        // 通知 Service 更新内存中的手动停止列表
-        service::signal_guard_stopped_changed();
+        service::send_guard_stopped_command(&format!("START:{}", name));
         // 检查 frpc.exe 是否存在
         if !crate::download::has_frpc_executable(
             &std::env::current_exe()
@@ -418,6 +414,14 @@ impl AppView {
                 match result {
                     Ok(p) => {
                         log::info!("[{}] frpc 进程已启动", nc);
+                        // 通知 Service 纳入守护跟踪（仅服务已注册时）
+                        if view.service_registered {
+                            service::send_guard_stopped_command(&format!(
+                                "TRACK:{}:{}",
+                                nc,
+                                p.pid()
+                            ));
+                        }
                         view.running
                             .insert(nc.clone(), RunningProcess { process: p });
                         cx.notify();
@@ -493,13 +497,9 @@ impl AppView {
     }
 
     pub fn stop_config(&mut self, name: &str, cx: &mut Context<Self>) {
-        // 标记为手动停止，防止健康检查重新发现
+        // 标记为手动停止，通过命名管道通知 Service 不要重启
         self.stopped_configs.insert(name.to_string());
-        // 写入共享文件，通知服务守护不要重启
-        let _ =
-            config::save_guard_stopped(&self.stopped_configs.iter().cloned().collect::<Vec<_>>());
-        // 通知 Service 更新内存中的手动停止列表
-        service::signal_guard_stopped_changed();
+        service::send_guard_stopped_command(&format!("STOP:{}", name));
         if let Some(mut rp) = self.running.remove(name) {
             self.is_processing = true;
             cx.notify();
@@ -718,9 +718,7 @@ impl AppView {
                         // 注册服务后 Service 会启动所有自启动配置，清空手动停止列表
                         // 避免 stopped_configs 阻止健康监控同步 Service 拉起的进程到 UI
                         v.stopped_configs.clear();
-                        let _ = config::save_guard_stopped(&[]);
-                        // 通知 Service 更新内存中的手动停止列表
-                        service::signal_guard_stopped_changed();
+                        service::send_guard_stopped_command("CLEAR");
 
                         v.set_status_message(
                             "注册成功，服务已启动".to_string(),
@@ -762,11 +760,9 @@ impl AppView {
                             log::error!("保存进程守护设置失败: {}", e);
                         }
 
-                        // 清空手动停止列表
+                        // 清空手动停止列表，通过命名管道通知 Service
                         v.stopped_configs.clear();
-                        let _ = config::save_guard_stopped(&[]);
-                        // 通知 Service 更新内存中的手动停止列表
-                        service::signal_guard_stopped_changed();
+                        service::send_guard_stopped_command("CLEAR");
 
                         // 注销后重新发现仍在运行的进程（服务注销不会停止 frpc）
                         let frpc_exe = config::frpc_exe_path().ok().filter(|p| p.exists());
@@ -807,68 +803,83 @@ impl AppView {
     }
 
     /// 启动周期性健康检查，每 3 秒检测所有运行中的 frpc 进程
+    /// 服务已注册时，每 9 秒发现一次 Service 管理的进程（减少 wmic 调用频率）
     pub fn start_health_monitor(cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| loop {
-            cx.background_spawn(async {
-                std::thread::sleep(Duration::from_secs(3));
-            })
-            .await;
-            let alive = this
-                .update(cx, |view, cx| {
-                    // Step 1: 检查已跟踪的进程是否仍然存活
-                    let mut dead_names = Vec::new();
-                    for (name, rp) in view.running.iter_mut() {
-                        if !rp.process.is_running() {
-                            log::warn!("[{}] 健康检查发现进程已退出", name);
-                            dead_names.push(name.clone());
+        cx.spawn(async move |this, cx| {
+            let mut discover_tick: u32 = 0;
+            loop {
+                cx.background_spawn(async {
+                    std::thread::sleep(Duration::from_secs(3));
+                })
+                .await;
+                let alive = this
+                    .update(cx, |view, cx| {
+                        // Step 1: 检查已跟踪的进程是否仍然存活
+                        let mut dead_names = Vec::new();
+                        for (name, rp) in view.running.iter_mut() {
+                            if !rp.process.is_running() {
+                                log::warn!("[{}] 健康检查发现进程已退出", name);
+                                dead_names.push(name.clone());
+                            }
                         }
-                    }
 
-                    // Step 2: 移除已退出的进程（进程守护由 Service 负责，UI 不重启）
-                    if !dead_names.is_empty() {
-                        for name in &dead_names {
-                            view.running.remove(name);
-                            log::info!("[{}] 进程已退出，已从运行列表移除", name);
+                        // Step 2: 移除已退出的进程（进程守护由 Service 负责，UI 不重启）
+                        if !dead_names.is_empty() {
+                            for name in &dead_names {
+                                view.running.remove(name);
+                                log::info!("[{}] 进程已退出，已从运行列表移除", name);
+                            }
+                            cx.notify();
                         }
-                        cx.notify();
-                    }
 
-                    // Step 3: 服务已注册时，定期发现 Service 管理的进程并同步
-                    if view.service_registered {
-                        let running_frpc = service::discover_running_frpc_processes();
-                        let frpc_exe = config::frpc_exe_path().ok().filter(|p| p.exists());
-                        if let Some(exe_path) = frpc_exe {
-                            let mut changed = false;
-                            for (name, pid) in running_frpc {
-                                if FrpcProcess::is_pid_running(pid)
-                                    && !view.running.contains_key(&name)
-                                    && !view.stopped_configs.contains(&name)
-                                {
-                                    let config_path =
-                                        config::config_toml_path(&name).unwrap_or_default();
-                                    let process = FrpcProcess::from_pid(
-                                        pid,
-                                        name.clone(),
-                                        exe_path.clone(),
-                                        config_path,
-                                    );
-                                    view.running
-                                        .insert(name.clone(), RunningProcess { process });
-                                    log::info!("[{}] 发现 Service 管理的进程 (PID: {})", name, pid);
-                                    changed = true;
+                        // Step 3: 服务已注册时，定期发现 Service 管理的进程并同步
+                        // 每 3 次健康检查（9秒）执行一次发现，减少 wmic 调用频率
+                        if view.service_registered {
+                            discover_tick += 1;
+                            if discover_tick >= 3 {
+                                discover_tick = 0;
+                                let running_frpc = service::discover_running_frpc_processes();
+                                let frpc_exe = config::frpc_exe_path().ok().filter(|p| p.exists());
+                                if let Some(exe_path) = frpc_exe {
+                                    let mut changed = false;
+                                    for (name, pid) in running_frpc {
+                                        // 不检查 stopped_configs：如果 Service 已拉起进程，UI 应显示
+                                        if FrpcProcess::is_pid_running(pid)
+                                            && !view.running.contains_key(&name)
+                                        {
+                                            let config_path =
+                                                config::config_toml_path(&name).unwrap_or_default();
+                                            let process = FrpcProcess::from_pid(
+                                                pid,
+                                                name.clone(),
+                                                exe_path.clone(),
+                                                config_path,
+                                            );
+                                            view.running
+                                                .insert(name.clone(), RunningProcess { process });
+                                            // 发现新进程时同步清除 stopped_configs
+                                            view.stopped_configs.remove(&name);
+                                            log::info!(
+                                                "[{}] 发现 Service 管理的进程 (PID: {})",
+                                                name,
+                                                pid
+                                            );
+                                            changed = true;
+                                        }
+                                    }
+                                    if changed {
+                                        cx.notify();
+                                    }
                                 }
                             }
-                            if changed {
-                                cx.notify();
-                            }
                         }
-                    }
 
-                    true
-                })
-                .unwrap_or(false);
-            if !alive {
-                break;
+                        true
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
             }
         })
         .detach();
@@ -896,9 +907,9 @@ impl gpui::Render for AppView {
 
 impl Drop for AppView {
     fn drop(&mut self) {
-        // 程序退出时清空手动停止列表，避免残留本次运行的状态
-        let _ = config::save_guard_stopped(&[]);
-        log::info!("程序退出，已清空 guard_stopped.json");
+        // 程序退出时通过命名管道通知 Service 清空手动停止列表
+        service::send_guard_stopped_command("CLEAR");
+        log::info!("程序退出，已通知 Service 清空手动停止列表");
     }
 }
 
