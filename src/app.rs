@@ -92,11 +92,7 @@ impl AppView {
             service_registered,
             configs,
             running,
-            stopped_configs: {
-                // 启动时清空手动停止列表，避免残留上次运行的状态
-                let _ = config::save_guard_stopped(&[]);
-                std::collections::HashSet::new()
-            },
+            stopped_configs: std::collections::HashSet::new(),
             edit_name: String::new(),
             edit_content: String::new(),
             edit_auto_start: false,
@@ -895,6 +891,14 @@ impl gpui::Render for AppView {
             .child(sb)
             .child(div().w(px(1.0)).h_full().bg(cx.theme().border))
             .child(content)
+    }
+}
+
+impl Drop for AppView {
+    fn drop(&mut self) {
+        // 程序退出时清空手动停止列表，避免残留本次运行的状态
+        let _ = config::save_guard_stopped(&[]);
+        log::info!("程序退出，已清空 guard_stopped.json");
     }
 }
 
