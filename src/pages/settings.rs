@@ -157,13 +157,20 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
                                         cx.theme().danger
                                     },
                                 ))
-                                .child(div().text_sm().text_color(cx.theme().foreground).child(
-                                    if view.service_registered {
-                                        "已注册"
-                                    } else {
-                                        "未注册"
-                                    },
-                                )),
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(if view.service_registered {
+                                            cx.theme().success
+                                        } else {
+                                            cx.theme().danger
+                                        })
+                                        .child(if view.service_registered {
+                                            "已注册"
+                                        } else {
+                                            "未注册"
+                                        }),
+                                ),
                         )
                         .child(if view.service_registered {
                             Button::new("btn-uninstall")
@@ -261,8 +268,9 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
                                     "未开启"
                                 }),
                         )
-                        .child(
+                        .child({
                             // 小开关
+                            let enabled = view.service_registered;
                             div()
                                 .id("switch-process-guard")
                                 .w(px(36.0))
@@ -273,7 +281,9 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
                                 } else {
                                     cx.theme().border
                                 })
-                                .cursor_pointer()
+                                .when(!enabled, |el| el.opacity(0.4))
+                                .when(enabled, |el| el.cursor_pointer())
+                                .when(!enabled, |el| el.cursor_not_allowed())
                                 .flex()
                                 .items_center()
                                 .px(px(2.0))
@@ -283,19 +293,29 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
                                         .h(px(16.0))
                                         .rounded_full()
                                         .bg(gpui::rgb(0xffffff))
-                                        .when(view.process_guard, |el| el.ml_auto()),
+                                        .when(view.process_guard && enabled, |el| el.ml_auto()),
                                 )
-                                .on_click(cx.listener(|view, _event, _window, cx| {
-                                    view.toggle_process_guard(cx);
-                                })),
-                        ),
+                                .when(enabled, |el| {
+                                    el.on_click(cx.listener(|view, _event, _window, cx| {
+                                        view.toggle_process_guard(cx);
+                                    }))
+                                })
+                        }),
                 )
                 // 说明
                 .child(
                     div()
                         .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("开启后，frpc 进程异常退出时会自动重启。"),
+                        .text_color(if view.service_registered {
+                            cx.theme().muted_foreground
+                        } else {
+                            cx.theme().danger
+                        })
+                        .child(if view.service_registered {
+                            "开启后，frpc 进程异常退出时会自动重启。"
+                        } else {
+                            "请先注册服务后再开启进程守护。"
+                        }),
                 ),
         )
         .child(div().mx(px(24.0)).child(separator(cx.theme())))

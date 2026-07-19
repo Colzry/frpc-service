@@ -188,7 +188,11 @@ pub fn render(view: &AppView, cx: &mut Context<AppView>) -> gpui::AnyElement {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(cx.theme().sidebar_foreground)
+                                .text_color(if view.service_registered {
+                                    cx.theme().success
+                                } else {
+                                    cx.theme().danger
+                                })
                                 .child(if view.service_registered {
                                     "已注册"
                                 } else {

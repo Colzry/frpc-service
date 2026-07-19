@@ -2,11 +2,12 @@
 //!
 
 use anyhow::{Context, Result};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::env;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 /// 服务停止信号，由 SCM 停止事件设置
@@ -104,10 +105,14 @@ pub(crate) fn install_service() -> Result<()> {
         )
         .context("创建服务失败，请确保以管理员身份运行")?;
     log::info!("服务 {} 已成功注册", SERVICE_NAME);
+
+    // 立即启动服务
+    start_service()?;
+
     Ok(())
 }
 
-/// 注销 Windows 服务（先停止服务、清理残留 frpc 进程，再删除）
+/// 注销 Windows 服务（先停止再删除）
 pub(crate) fn uninstall_service() -> Result<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::all())?;
     let service = manager.open_service(
@@ -118,6 +123,42 @@ pub(crate) fn uninstall_service() -> Result<()> {
     service.delete().context("无法删除服务")?;
     log::info!("服务 {} 已删除", SERVICE_NAME);
     Ok(())
+}
+
+/// 启动 Windows 服务
+pub(crate) fn start_service() -> Result<()> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let service = manager.open_service(
+        SERVICE_NAME,
+        ServiceAccess::START | ServiceAccess::QUERY_STATUS,
+    )?;
+    let status = service.query_status()?;
+    if status.current_state == ServiceState::Running {
+        log::info!("服务 {} 已在运行", SERVICE_NAME);
+        return Ok(());
+    }
+    service.start(&[] as &[&str]).context("无法启动服务")?;
+    log::info!("服务 {} 已启动", SERVICE_NAME);
+    Ok(())
+}
+
+/// 停止 Windows 服务
+#[allow(dead_code)]
+pub(crate) fn stop_service() -> Result<()> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let service = manager.open_service(
+        SERVICE_NAME,
+        ServiceAccess::STOP | ServiceAccess::QUERY_STATUS,
+    )?;
+    stop_service_if_running(&service)
+}
+
+/// 重启 Windows 服务（先停止再启动，不影响已运行的 frpc 进程）
+#[allow(dead_code)]
+pub(crate) fn restart_service() -> Result<()> {
+    stop_service()?;
+    std::thread::sleep(Duration::from_millis(500));
+    start_service()
 }
 
 /// 启动一个 frpc 配置进程（无连接回调）
@@ -189,12 +230,22 @@ fn run_service() -> Result<()> {
         .context("无法注册服务控制处理程序")?;
     set_service_status(&status_handle, ServiceState::StartPending)?;
 
-    let settings = config::load_settings();
+    let mut settings = config::load_settings();
 
-    // 启动所有自启动配置
+    // 启动所有自启动配置（跳过已运行的）
+    let running_frpc = discover_running_frpc_processes();
     let instances = discover_auto_start_instances()?;
     let mut processes: Vec<(String, FrpcProcess)> = Vec::new();
     for (id, exe, conf) in instances {
+        if let Some((_, pid)) = running_frpc.iter().find(|(n, _)| n == &id) {
+            // 已有进程在运行，直接跟踪
+            if FrpcProcess::is_pid_running(*pid) {
+                let process = FrpcProcess::from_pid(*pid, id.clone(), exe, conf);
+                log::info!("[{}] 检测到已运行的进程 (PID: {})", id, pid);
+                processes.push((id, process));
+                continue;
+            }
+        }
         match FrpcProcess::start(id.clone(), exe, conf, None) {
             Ok(p) => {
                 log::info!("[{}] frpc 进程已启动", id);
@@ -210,45 +261,65 @@ fn run_service() -> Result<()> {
         log::info!("成功启动 {} 个 frpc 实例", processes.len());
     }
 
-    if !settings.process_guard {
-        // 未开启进程守护，服务直接退出，frpc 进程独立运行
-        set_service_status(&status_handle, ServiceState::Stopped)?;
-        return Ok(());
-    }
-
-    // 开启进程守护：保持服务运行，监控进程状态
-    log::info!("进程守护已开启，服务将持续运行");
+    // 服务始终运行，进程守护由设置动态控制
+    log::info!("服务已启动，进程守护: {}", settings.process_guard);
     set_service_status(&status_handle, ServiceState::Running)?;
 
-    // 重新发现自启动配置，用于进程退出后重启
     let auto_start_map = discover_auto_start_map();
 
-    let mut loop_count: u32 = 0;
-    let mut guard_stopped: Vec<String> = Vec::new();
+    // 文件监听：settings.json 变化时立即重新加载（guard_stopped 在进程退出时直接读文件）
+    let conf_dir = config::conf_dir().unwrap_or_default();
+    let (tx, rx): (Sender<Event>, Receiver<Event>) = mpsc::channel();
+    let mut watcher = RecommendedWatcher::new(
+        move |res: Result<Event, notify::Error>| {
+            if let Ok(event) = res {
+                let _ = tx.send(event);
+            }
+        },
+        notify::Config::default(),
+    )
+    .context("无法创建文件监听器")?;
+    watcher
+        .watch(&conf_dir, RecursiveMode::NonRecursive)
+        .context("无法监听 conf 目录")?;
 
     loop {
-        // 检查是否收到停止信号
         if SERVICE_STOP_REQUESTED.load(Ordering::SeqCst) {
             log::info!("收到服务停止信号");
             set_service_status(&status_handle, ServiceState::Stopped)?;
             return Ok(());
         }
 
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        loop_count = (loop_count + 1) % 3;
-
-        // 每 3 秒读取一次 UI 手动停止列表
-        if loop_count == 0 {
-            guard_stopped = config::load_guard_stopped();
+        // 处理文件变化事件，重新加载设置（guard_stopped 在进程退出时直接读文件）
+        while let Ok(event) = rx.try_recv() {
+            if let EventKind::Modify(_) | EventKind::Create(_) = event.kind {
+                for path in &event.paths {
+                    let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if fname == "settings.json" {
+                        settings = config::load_settings();
+                        log::info!("检测到 settings.json 变化，重新加载设置");
+                    }
+                }
+            }
         }
 
-        // 检查是否有进程退出
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        // 进程守护未开启时，不监控不重启
+        if !settings.process_guard {
+            continue;
+        }
+
+        // 进程守护开启：检查是否有进程退出并重启
+        // 重启前重新读取 guard_stopped.json，避免与 UI 手动停止产生竞态
         let mut restart_list = Vec::new();
         processes.retain(|(name, proc)| {
             if FrpcProcess::is_pid_running(proc.pid()) {
                 true
             } else {
-                if guard_stopped.contains(name) {
+                // 每次检测到进程退出时重新读取，确保拿到最新状态
+                let latest_stopped = config::load_guard_stopped();
+                if latest_stopped.contains(name) {
                     log::info!("[{}] 进程已退出（UI 手动停止，不重启）", name);
                 } else {
                     log::warn!("[{}] 进程守护发现进程已退出，将重启", name);
@@ -258,7 +329,6 @@ fn run_service() -> Result<()> {
             }
         });
 
-        // 重启退出的进程
         for name in restart_list {
             if let Some((exe, conf)) = auto_start_map.get(&name) {
                 match FrpcProcess::start(name.clone(), exe.clone(), conf.clone(), None) {
@@ -327,12 +397,11 @@ fn discover_auto_start_map() -> std::collections::HashMap<String, (PathBuf, Path
 
 /// 发现当前正在运行的 frpc 进程，匹配到已有配置
 ///
-/// 返回 (配置名, PID) 的列表
+/// 返回 (配置名, PID) 的列表。优先使用 wmic（快速），失败则回退到 PowerShell。
 pub fn discover_running_frpc_processes() -> Vec<(String, u32)> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    // 获取 frpc.exe 路径
     let frpc_exe = match config::frpc_exe_path() {
         Ok(p) => p,
         Err(_) => return Vec::new(),
@@ -341,8 +410,14 @@ pub fn discover_running_frpc_processes() -> Vec<(String, u32)> {
         return Vec::new();
     }
 
-    // 使用 wmic 获取 frpc.exe 进程的命令行
-    let output = match std::process::Command::new("wmic")
+    let configs = config::load_configs().unwrap_or_default();
+    if configs.is_empty() {
+        return Vec::new();
+    }
+    let conf_dir = config::conf_dir().unwrap_or_default();
+
+    // 尝试 wmic（快速），失败或无输出则回退到 PowerShell
+    let stdout = match std::process::Command::new("wmic")
         .args([
             "process",
             "where",
@@ -354,53 +429,93 @@ pub fn discover_running_frpc_processes() -> Vec<(String, u32)> {
         .creation_flags(CREATE_NO_WINDOW)
         .output()
     {
-        Ok(o) => o,
-        Err(e) => {
-            log::warn!("wmic 执行失败: {}", e);
-            return Vec::new();
+        Ok(o) if !o.stdout.is_empty() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        _ => {
+            log::info!("wmic 不可用或无输出，尝试 PowerShell");
+            match std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command",
+                    "Get-CimInstance Win32_Process -Filter \"Name='frpc.exe'\" | Select-Object ProcessId,CommandLine | ConvertTo-CSV -NoTypeInformation"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+            {
+                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+                _ => {
+                    log::warn!("PowerShell 也无法获取进程信息");
+                    return Vec::new();
+                }
+            }
         }
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let configs = config::load_configs().unwrap_or_default();
-    let conf_dir = config::conf_dir().unwrap_or_default();
+    if stdout.trim().is_empty() {
+        return Vec::new();
+    }
+
     let mut result = Vec::new();
 
     for line in stdout.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with("Node") || line.starts_with("CommandLine") {
+        if line.is_empty() {
             continue;
         }
-        // CSV 格式: Node,CommandLine,ProcessId
-        let parts: Vec<&str> = line.split(',').collect();
-        if parts.len() < 3 {
-            continue;
-        }
-        let cmd_line = parts[1];
-        let pid_str = parts[2].trim();
 
-        // 解析 PID
-        let pid: u32 = match pid_str.parse() {
-            Ok(p) => p,
-            Err(_) => continue,
+        let fields = parse_csv_line(line);
+
+        // 跳过标题行
+        if fields
+            .iter()
+            .any(|f| f == "ProcessId" || f == "CommandLine" || f == "Node")
+        {
+            continue;
+        }
+
+        // 解析 PID 和命令行（wmic: Node,CommandLine,ProcessId；PowerShell: ProcessId,CommandLine）
+        let (pid, cmd_line) = if fields.len() >= 3 {
+            match fields[2].trim().parse::<u32>() {
+                Ok(p) => (p, fields[1].as_str()),
+                Err(_) => continue,
+            }
+        } else if fields.len() == 2 {
+            if let Ok(p) = fields[0].trim().parse::<u32>() {
+                (p, fields[1].as_str())
+            } else if let Ok(p) = fields[1].trim().parse::<u32>() {
+                (p, fields[0].as_str())
+            } else {
+                continue;
+            }
+        } else {
+            continue;
         };
 
-        // 从命令行中提取配置文件名
-        // 命令行格式: frpc.exe -c <config_path>
+        // 匹配配置
         for config_meta in &configs {
             let config_path = conf_dir.join(format!("{}.toml", config_meta.name));
             let config_path_str = config_path.to_string_lossy();
             if cmd_line.contains(&*config_path_str) {
                 result.push((config_meta.name.clone(), pid));
-                log::info!(
-                    "发现运行中的 frpc 进程: {} (PID: {})",
-                    config_meta.name,
-                    pid
-                );
                 break;
             }
         }
     }
 
     result
+}
+
+/// CSV 行解析，支持引号包裹的字段
+fn parse_csv_line(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for ch in line.chars() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                fields.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    fields.push(current.trim().to_string());
+    fields
 }

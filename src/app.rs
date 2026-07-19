@@ -92,7 +92,11 @@ impl AppView {
             service_registered,
             configs,
             running,
-            stopped_configs: config::load_guard_stopped().into_iter().collect(),
+            stopped_configs: {
+                // 启动时清空手动停止列表，避免残留上次运行的状态
+                let _ = config::save_guard_stopped(&[]);
+                std::collections::HashSet::new()
+            },
             edit_name: String::new(),
             edit_content: String::new(),
             edit_auto_start: false,
@@ -126,6 +130,14 @@ impl AppView {
     }
 
     pub fn toggle_process_guard(&mut self, cx: &mut Context<Self>) {
+        if !self.service_registered {
+            self.set_status_message(
+                "请先注册服务后再开启进程守护".to_string(),
+                MessageLevel::Warning,
+                cx,
+            );
+            return;
+        }
         self.process_guard = !self.process_guard;
         let settings = config::AppSettings {
             process_guard: self.process_guard,
@@ -145,7 +157,6 @@ impl AppView {
                 self.set_status_message(format!("保存设置失败: {}", e), MessageLevel::Error, cx);
             }
         }
-        cx.notify();
         cx.notify();
     }
 
@@ -350,6 +361,25 @@ impl AppView {
     pub fn start_config(&mut self, name: &str, cx: &mut Context<Self>) {
         if self.running.contains_key(name) {
             return;
+        }
+        // 服务已注册时，先检查是否已被 Service 管理（避免重复启动）
+        if self.service_registered {
+            let running_frpc = service::discover_running_frpc_processes();
+            if let Some((_, pid)) = running_frpc.iter().find(|(n, _)| n == name) {
+                if FrpcProcess::is_pid_running(*pid) {
+                    let frpc_exe = config::frpc_exe_path().ok().filter(|p| p.exists());
+                    if let Some(exe_path) = frpc_exe {
+                        let config_path = config::config_toml_path(name).unwrap_or_default();
+                        let process =
+                            FrpcProcess::from_pid(*pid, name.to_string(), exe_path, config_path);
+                        self.running
+                            .insert(name.to_string(), RunningProcess { process });
+                        log::info!("[{}] 进程已由 Service 管理，同步状态 (PID: {})", name, pid);
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
         }
         // 从手动停止列表中移除，允许健康检查监控
         self.stopped_configs.remove(name);
@@ -682,7 +712,17 @@ impl AppView {
                 match r {
                     Ok(()) => {
                         v.service_registered = true;
-                        v.set_status_message("注册成功".to_string(), MessageLevel::Success, cx);
+
+                        // 注册服务后 Service 会启动所有自启动配置，清空手动停止列表
+                        // 避免 stopped_configs 阻止健康监控同步 Service 拉起的进程到 UI
+                        v.stopped_configs.clear();
+                        let _ = config::save_guard_stopped(&[]);
+
+                        v.set_status_message(
+                            "注册成功，服务已启动".to_string(),
+                            MessageLevel::Success,
+                            cx,
+                        );
                     }
                     Err(e) => {
                         v.set_status_message(format!("注册失败：{}", e), MessageLevel::Error, cx);
@@ -708,6 +748,45 @@ impl AppView {
                 match r {
                     Ok(()) => {
                         v.service_registered = false;
+
+                        // 关闭进程守护
+                        v.process_guard = false;
+                        let settings = config::AppSettings {
+                            process_guard: false,
+                        };
+                        if let Err(e) = config::save_settings(&settings) {
+                            log::error!("保存进程守护设置失败: {}", e);
+                        }
+
+                        // 清空手动停止列表
+                        v.stopped_configs.clear();
+                        let _ = config::save_guard_stopped(&[]);
+
+                        // 注销后重新发现仍在运行的进程（服务注销不会停止 frpc）
+                        let frpc_exe = config::frpc_exe_path().ok().filter(|p| p.exists());
+                        if let Some(exe_path) = frpc_exe {
+                            for (name, pid) in service::discover_running_frpc_processes() {
+                                if FrpcProcess::is_pid_running(pid)
+                                    && !v.running.contains_key(&name)
+                                {
+                                    let config_path =
+                                        config::config_toml_path(&name).unwrap_or_default();
+                                    let process = FrpcProcess::from_pid(
+                                        pid,
+                                        name.clone(),
+                                        exe_path.clone(),
+                                        config_path,
+                                    );
+                                    v.running.insert(name.clone(), RunningProcess { process });
+                                    log::info!(
+                                        "[{}] 注销后发现仍在运行的进程 (PID: {})",
+                                        name,
+                                        pid
+                                    );
+                                }
+                            }
+                        }
+
                         v.set_status_message("已注销".to_string(), MessageLevel::Success, cx);
                     }
                     Err(e) => {
@@ -730,7 +809,7 @@ impl AppView {
             .await;
             let alive = this
                 .update(cx, |view, cx| {
-                    // 检查已跟踪的进程是否仍然存活
+                    // Step 1: 检查已跟踪的进程是否仍然存活
                     let mut dead_names = Vec::new();
                     for (name, rp) in view.running.iter_mut() {
                         if !rp.process.is_running() {
@@ -738,33 +817,45 @@ impl AppView {
                             dead_names.push(name.clone());
                         }
                     }
+
+                    // Step 2: 移除已退出的进程（进程守护由 Service 负责，UI 不重启）
                     if !dead_names.is_empty() {
                         for name in &dead_names {
                             view.running.remove(name);
-
-                            // 进程守护：非手动停止的进程自动重启
-                            if view.process_guard && !view.stopped_configs.contains(name) {
-                                log::info!("[{}] 进程守护：尝试重启", name);
-                                match service::start_frpc_process(name) {
-                                    Ok(p) => {
-                                        view.running
-                                            .insert(name.clone(), RunningProcess { process: p });
-                                        log::info!("[{}] 进程守护：重启成功", name);
-                                        view.set_status_message(
-                                            format!("'{}' 进程异常退出，已自动重启", name),
-                                            MessageLevel::Warning,
-                                            cx,
-                                        );
-                                    }
-                                    Err(e) => {
-                                        log::error!("[{}] 进程守护：重启失败 - {}", name, e);
-                                    }
-                                }
-                            } else {
-                                log::info!("[{}] 已从运行列表移除", name);
-                            }
+                            log::info!("[{}] 进程已退出，已从运行列表移除", name);
                         }
                         cx.notify();
+                    }
+
+                    // Step 3: 服务已注册时，定期发现 Service 管理的进程并同步
+                    if view.service_registered {
+                        let running_frpc = service::discover_running_frpc_processes();
+                        let frpc_exe = config::frpc_exe_path().ok().filter(|p| p.exists());
+                        if let Some(exe_path) = frpc_exe {
+                            let mut changed = false;
+                            for (name, pid) in running_frpc {
+                                if FrpcProcess::is_pid_running(pid)
+                                    && !view.running.contains_key(&name)
+                                    && !view.stopped_configs.contains(&name)
+                                {
+                                    let config_path =
+                                        config::config_toml_path(&name).unwrap_or_default();
+                                    let process = FrpcProcess::from_pid(
+                                        pid,
+                                        name.clone(),
+                                        exe_path.clone(),
+                                        config_path,
+                                    );
+                                    view.running
+                                        .insert(name.clone(), RunningProcess { process });
+                                    log::info!("[{}] 发现 Service 管理的进程 (PID: {})", name, pid);
+                                    changed = true;
+                                }
+                            }
+                            if changed {
+                                cx.notify();
+                            }
+                        }
                     }
 
                     true
