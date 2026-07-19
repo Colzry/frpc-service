@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 windows-service = "0.8.0"
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", features = ["tree-sitter-toml"] }
@@ -19,7 +19,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 zip = { version = "2", default-features = false, features = ["deflate"] }
-notify = "7"
 
 [build-dependencies]
 winres = "0.1"

@@ -144,6 +144,8 @@ impl AppView {
         };
         match config::save_settings(&settings) {
             Ok(()) => {
+                // 通知 Service 重新加载设置
+                service::signal_guard_changed();
                 let msg = if self.process_guard {
                     "进程守护已开启".to_string()
                 } else {
@@ -386,6 +388,8 @@ impl AppView {
         // 更新共享文件
         let _ =
             config::save_guard_stopped(&self.stopped_configs.iter().cloned().collect::<Vec<_>>());
+        // 通知 Service 更新内存中的手动停止列表
+        service::signal_guard_stopped_changed();
         // 检查 frpc.exe 是否存在
         if !crate::download::has_frpc_executable(
             &std::env::current_exe()
@@ -498,6 +502,8 @@ impl AppView {
         // 写入共享文件，通知服务守护不要重启
         let _ =
             config::save_guard_stopped(&self.stopped_configs.iter().cloned().collect::<Vec<_>>());
+        // 通知 Service 更新内存中的手动停止列表
+        service::signal_guard_stopped_changed();
         if let Some(mut rp) = self.running.remove(name) {
             self.is_processing = true;
             cx.notify();
@@ -717,6 +723,8 @@ impl AppView {
                         // 避免 stopped_configs 阻止健康监控同步 Service 拉起的进程到 UI
                         v.stopped_configs.clear();
                         let _ = config::save_guard_stopped(&[]);
+                        // 通知 Service 更新内存中的手动停止列表
+                        service::signal_guard_stopped_changed();
 
                         v.set_status_message(
                             "注册成功，服务已启动".to_string(),
@@ -761,6 +769,8 @@ impl AppView {
                         // 清空手动停止列表
                         v.stopped_configs.clear();
                         let _ = config::save_guard_stopped(&[]);
+                        // 通知 Service 更新内存中的手动停止列表
+                        service::signal_guard_stopped_changed();
 
                         // 注销后重新发现仍在运行的进程（服务注销不会停止 frpc）
                         let frpc_exe = config::frpc_exe_path().ok().filter(|p| p.exists());

@@ -2,16 +2,90 @@
 //!
 
 use anyhow::{Context, Result};
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashSet;
 use std::env;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::Sender;
 use std::time::Duration;
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Security::{
+    InitializeSecurityDescriptor, SetSecurityDescriptorDacl, SECURITY_ATTRIBUTES,
+    SECURITY_DESCRIPTOR,
+};
+use windows_sys::Win32::System::Threading::{
+    CreateEventW, OpenEventW, SetEvent, WaitForMultipleObjects,
+};
 
 /// 服务停止信号，由 SCM 停止事件设置
 static SERVICE_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+// Event access constants
+const EVENT_MODIFY_STATE: u32 = 0x0002;
+const WAIT_OBJECT_0: u32 = 0;
+const WAIT_TIMEOUT: u32 = 0x102;
+
+/// "Global\FrpcGuardChanged" as UTF-16 with null terminator
+fn guard_event_name() -> Vec<u16> {
+    "Global\\FrpcGuardChanged\0".encode_utf16().collect()
+}
+
+/// "Global\FrpcGuardStoppedChanged" as UTF-16 with null terminator
+fn guard_stopped_event_name() -> Vec<u16> {
+    "Global\\FrpcGuardStoppedChanged\0".encode_utf16().collect()
+}
+
+/// Create a named event with NULL DACL (allows cross-session access)
+///
+/// The service runs as SYSTEM (session 0) and the UI runs as the user (session 1+).
+/// A NULL DACL grants everyone access to the named event.
+fn create_named_event(name: &[u16], desc: &str) -> Result<HANDLE> {
+    let mut sd: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+
+    unsafe {
+        if InitializeSecurityDescriptor(&mut sd as *mut _ as *mut _, 1) == 0 {
+            return Err(anyhow::anyhow!("无法初始化安全描述符"));
+        }
+        // NULL DACL = everyone has access
+        if SetSecurityDescriptorDacl(&mut sd as *mut _ as *mut _, 1, std::ptr::null(), 0) == 0 {
+            return Err(anyhow::anyhow!("无法设置安全描述符 DACL"));
+        }
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: &mut sd as *mut _ as *mut _,
+            bInheritHandle: 0,
+        };
+        let event = CreateEventW(&sa, 0, 0, name.as_ptr());
+        if event == 0 {
+            return Err(anyhow::anyhow!("无法创建{}事件", desc));
+        }
+        Ok(event)
+    }
+}
+
+/// Signal a named event by name. Does nothing if the event doesn't exist.
+fn signal_named_event(name: &[u16]) {
+    unsafe {
+        let event = OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr());
+        if event != 0 {
+            SetEvent(event);
+            CloseHandle(event);
+        }
+    }
+}
+
+/// Signal the guard change event to wake up the service.
+/// Called by the UI after toggling process guard.
+pub fn signal_guard_changed() {
+    signal_named_event(&guard_event_name());
+}
+
+/// Signal the guard stopped list change event to wake up the service.
+/// Called by the UI after modifying guard_stopped.json.
+pub fn signal_guard_stopped_changed() {
+    signal_named_event(&guard_stopped_event_name());
+}
 use windows_service::service::{
     ServiceAccess, ServiceControlAccept, ServiceErrorControl, ServiceExitCode, ServiceInfo,
     ServiceStartType, ServiceState, ServiceStatus, ServiceType,
@@ -267,43 +341,51 @@ fn run_service() -> Result<()> {
 
     let auto_start_map = discover_auto_start_map();
 
-    // 文件监听：settings.json 变化时立即重新加载（guard_stopped 在进程退出时直接读文件）
-    let conf_dir = config::conf_dir().unwrap_or_default();
-    let (tx, rx): (Sender<Event>, Receiver<Event>) = mpsc::channel();
-    let mut watcher = RecommendedWatcher::new(
-        move |res: Result<Event, notify::Error>| {
-            if let Ok(event) = res {
-                let _ = tx.send(event);
-            }
-        },
-        notify::Config::default(),
-    )
-    .context("无法创建文件监听器")?;
-    watcher
-        .watch(&conf_dir, RecursiveMode::NonRecursive)
-        .context("无法监听 conf 目录")?;
+    // 创建跨进程命名事件，UI 可通过信号通知服务
+    let guard_event = create_named_event(&guard_event_name(), "进程守护")?;
+    let guard_stopped_event = create_named_event(&guard_stopped_event_name(), "手动停止列表")?;
+
+    // 维护内存中的手动停止列表，避免每次检测进程退出时读取文件
+    let mut guard_stopped: HashSet<String> = config::load_guard_stopped().into_iter().collect();
+
+    // 事件句柄数组，用于 WaitForMultipleObjects
+    let handles = [guard_event, guard_stopped_event];
 
     loop {
         if SERVICE_STOP_REQUESTED.load(Ordering::SeqCst) {
             log::info!("收到服务停止信号");
+            unsafe {
+                CloseHandle(guard_event);
+                CloseHandle(guard_stopped_event);
+            }
             set_service_status(&status_handle, ServiceState::Stopped)?;
             return Ok(());
         }
 
-        // 处理文件变化事件，重新加载设置（guard_stopped 在进程退出时直接读文件）
-        while let Ok(event) = rx.try_recv() {
-            if let EventKind::Modify(_) | EventKind::Create(_) = event.kind {
-                for path in &event.paths {
-                    let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if fname == "settings.json" {
-                        settings = config::load_settings();
-                        log::info!("检测到 settings.json 变化，重新加载设置");
-                    }
-                }
+        // 使用命名事件等待 1 秒，替代 thread::sleep
+        // - WAIT_OBJECT_0: guard_event 信号化（进程守护开关切换）
+        // - WAIT_OBJECT_0+1: guard_stopped_event 信号化（手动停止列表变更）
+        // - WAIT_TIMEOUT: 超时，继续检查进程状态
+        let wait_result = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, 1000) };
+        match wait_result {
+            WAIT_OBJECT_0 => {
+                // 进程守护开关切换，直接翻转即可，无需读取文件
+                settings.process_guard = !settings.process_guard;
+                log::info!(
+                    "收到进程守护变更信号，process_guard={}",
+                    settings.process_guard
+                );
+            }
+            1 => {
+                // 手动停止列表变更，重新读取文件更新内存缓存
+                guard_stopped = config::load_guard_stopped().into_iter().collect();
+                log::info!("收到手动停止列表变更信号，已更新缓存");
+            }
+            WAIT_TIMEOUT => {} // 超时，继续检查进程状态
+            _ => {
+                log::error!("WaitForMultipleObjects 返回未知状态: {}", wait_result);
             }
         }
-
-        std::thread::sleep(std::time::Duration::from_secs(1));
 
         // 进程守护未开启时，不监控不重启
         if !settings.process_guard {
@@ -311,15 +393,13 @@ fn run_service() -> Result<()> {
         }
 
         // 进程守护开启：检查是否有进程退出并重启
-        // 重启前重新读取 guard_stopped.json，避免与 UI 手动停止产生竞态
+        // 直接查询内存中的 guard_stopped HashSet，无需读取文件
         let mut restart_list = Vec::new();
         processes.retain(|(name, proc)| {
             if FrpcProcess::is_pid_running(proc.pid()) {
                 true
             } else {
-                // 每次检测到进程退出时重新读取，确保拿到最新状态
-                let latest_stopped = config::load_guard_stopped();
-                if latest_stopped.contains(name) {
+                if guard_stopped.contains(name) {
                     log::info!("[{}] 进程已退出（UI 手动停止，不重启）", name);
                 } else {
                     log::warn!("[{}] 进程守护发现进程已退出，将重启", name);
@@ -330,6 +410,11 @@ fn run_service() -> Result<()> {
         });
 
         for name in restart_list {
+            // 再次检查内存缓存，防止 UI 在 retain 与 restart 之间发送了信号
+            if guard_stopped.contains(&name) {
+                log::info!("[{}] 已在手动停止列表中，跳过重启", name);
+                continue;
+            }
             if let Some((exe, conf)) = auto_start_map.get(&name) {
                 match FrpcProcess::start(name.clone(), exe.clone(), conf.clone(), None) {
                     Ok(p) => {
