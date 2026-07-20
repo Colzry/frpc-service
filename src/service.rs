@@ -391,10 +391,7 @@ pub(crate) fn install_service() -> Result<()> {
             ServiceAccess::all(),
         )
         .context("创建服务失败，请确保以管理员身份运行")?;
-    log::info!("服务 {} 已成功注册", SERVICE_NAME);
-
-    // 立即启动服务
-    start_service()?;
+    log::info!("服务 {} 已成功注册（重启电脑后生效）", SERVICE_NAME);
 
     Ok(())
 }
@@ -534,6 +531,14 @@ fn run_service() -> Result<()> {
     }
     set_service_status(&status_handle, ServiceState::Running)?;
 
+    // 进程守护未开启时：启动自启动配置后立即退出
+    // frpc 进程会继续作为孤儿进程运行
+    if !settings.process_guard {
+        log::info!("进程守护未开启，服务退出（已启动自启动配置）");
+        set_service_status(&status_handle, ServiceState::Stopped)?;
+        return Ok(());
+    }
+
     // auto_start_map 共享给管道线程（TRACK 命令需要查找 exe/conf）
     let auto_start_map = Arc::new(discover_auto_start_map());
 
@@ -571,9 +576,9 @@ fn run_service() -> Result<()> {
                     "收到进程守护变更信号，process_guard={}",
                     settings.process_guard
                 );
-                // 开启进程守护时，清理已在守护关闭期间退出的进程
-                // 只监控开启后存活的进程，避免重启之前已死的进程
                 if settings.process_guard {
+                    // 开启进程守护：清理已在守护关闭期间退出的进程
+                    // 只监控开启后存活的进程，避免重启之前已死的进程
                     let mut proc_list = processes.lock().unwrap();
                     let before = proc_list.len();
                     proc_list.retain(|(_, proc)| FrpcProcess::is_pid_running(proc.pid()));
@@ -587,17 +592,21 @@ fn run_service() -> Result<()> {
                     } else {
                         log::info!("进程守护已开启，当前跟踪 {} 个进程", after);
                     }
+                } else {
+                    // 关闭进程守护：退出服务，frpc 进程继续作为孤儿进程运行
+                    log::info!("进程守护已关闭，服务退出");
+                    unsafe {
+                        CloseHandle(guard_event);
+                        CloseHandle(process_changed_event);
+                    }
+                    set_service_status(&status_handle, ServiceState::Stopped)?;
+                    return Ok(());
                 }
             }
             WAIT_TIMEOUT => {} // 超时，继续检查进程状态
             _ => {
                 log::error!("WaitForMultipleObjects 返回未知状态: {}", wait_result);
             }
-        }
-
-        // 进程守护未开启时，不监控不重启
-        if !settings.process_guard {
-            continue;
         }
 
         // 进程守护开启：检查是否有进程退出并重启

@@ -140,15 +140,34 @@ impl AppView {
         };
         match config::save_settings(&settings) {
             Ok(()) => {
-                // 通知 Service 重新加载设置
-                service::signal_guard_changed();
-                let msg = if self.process_guard {
-                    "进程守护已开启".to_string()
+                if self.process_guard {
+                    // 开启进程守护：启动 Service，Service 读取设置后持续运行监控
+                    match service::start_service() {
+                        Ok(()) => {
+                            self.set_status_message(
+                                "进程守护已开启，服务已启动".to_string(),
+                                MessageLevel::Success,
+                                cx,
+                            );
+                        }
+                        Err(e) => {
+                            self.set_status_message(
+                                format!("启动服务失败: {}", e),
+                                MessageLevel::Error,
+                                cx,
+                            );
+                        }
+                    }
                 } else {
-                    "进程守护已关闭".to_string()
-                };
+                    // 关闭进程守护：通知 Service 退出
+                    service::signal_guard_changed();
+                    self.set_status_message(
+                        "进程守护已关闭".to_string(),
+                        MessageLevel::Success,
+                        cx,
+                    );
+                }
                 log::info!("进程守护设置已变更: {}", self.process_guard);
-                self.set_status_message(msg, MessageLevel::Success, cx);
             }
             Err(e) => {
                 log::error!("保存进程守护设置失败: {}", e);
@@ -715,13 +734,12 @@ impl AppView {
                     Ok(()) => {
                         v.service_registered = true;
 
-                        // 注册服务后 Service 会启动所有自启动配置，清空手动停止列表
-                        // 避免 stopped_configs 阻止健康监控同步 Service 拉起的进程到 UI
+                        // 注册服务后清空手动停止列表
+                        // Service 不会立即启动，重启电脑后才生效
                         v.stopped_configs.clear();
-                        service::send_guard_stopped_command("CLEAR");
 
                         v.set_status_message(
-                            "注册成功，服务已启动".to_string(),
+                            "注册成功，重启电脑后生效".to_string(),
                             MessageLevel::Success,
                             cx,
                         );

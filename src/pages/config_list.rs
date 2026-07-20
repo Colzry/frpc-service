@@ -149,7 +149,6 @@ pub fn render(view: &mut AppView, cx: &mut Context<AppView>) -> gpui::AnyElement
             .pb(px(16.0))
             .child(
                 Button::new("btn-prev-page")
-                    .icon(AppIcon::ArrowLeft)
                     .label("上一页")
                     .when(!has_prev, |b| b.disabled(true))
                     .on_click(cx.listener(|view, _event, _window, cx| {
