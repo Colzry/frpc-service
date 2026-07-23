@@ -950,7 +950,7 @@ pub fn run_app(pre_check: PreCheckResult) {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(930.0), px(720.0))),
                 titlebar: Some(TitlebarOptions {
-                    title: Some(SharedString::from("FrpcDesk")),
+                    title: Some(SharedString::from("FrpDesk")),
                     ..Default::default()
                 }),
                 ..Default::default()

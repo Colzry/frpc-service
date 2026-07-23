@@ -1,4 +1,4 @@
-# FrpcDesk
+# FrpDesk
 
 一个使用 Rust 开发的 Windows frpc 桌面管理工具，基于 [GPUI](https://github.com/zed-industries/zed) 构建现代化原生图形界面，用于管理多个 [frpc](https://github.com/fatedier/frp) 实例。
 
@@ -32,7 +32,7 @@
 
 ### 首次使用
 
-1. 从 [Releases 页面](https://github.com/Colzry/FrpcDesk/releases) 下载 `frpcdesk.exe`
+1. 从 [Releases 页面](https://github.com/Colzry/FrpDesk/releases) 下载 `frpdesk.exe`
 2. 放入任意目录，双击运行
 3. 进入 **设置** 页面，点击 **下载** 按钮自动获取 frpc 程序
 4. 返回 **配置** 页面，点击 **添加配置** 填写 frpc TOML 配置
@@ -116,7 +116,7 @@ cargo build
 cargo build --release
 ```
 
-输出文件：`target/release/frpcdesk.exe`
+输出文件：`target/release/frpdesk.exe`
 
 ### 依赖
 

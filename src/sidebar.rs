@@ -58,7 +58,7 @@ pub fn render(view: &AppView, cx: &mut Context<AppView>) -> gpui::AnyElement {
                         .text_sm()
                         .font_weight(FontWeight::BOLD)
                         .text_color(cx.theme().sidebar_foreground)
-                        .child("FrpcDesk"),
+                        .child("FrpDesk"),
                 )
                 .child(
                     div()
